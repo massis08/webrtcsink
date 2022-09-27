@@ -1311,22 +1311,22 @@ impl Consumer {
             .request_pad_simple(&format!("sink_{}", media_idx))
             .unwrap();
 
-        let transceiver = pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
+        // let transceiver = pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
 
-        transceiver.set_property(
-            "direction",
-            gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-        );
+        // transceiver.set_property(
+        //     "direction",
+        //     gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+        // );
 
-        transceiver.set_property("codec-preferences", &payloader_caps);
+        // transceiver.set_property("codec-preferences", &payloader_caps);
 
-        if stream.sink_pad.name().starts_with("video_") {
-            if settings.do_fec {
-                transceiver.set_property("fec-type", gst_webrtc::WebRTCFECType::UlpRed);
-            }
+        // if stream.sink_pad.name().starts_with("video_") {
+        //     if settings.do_fec {
+        //         transceiver.set_property("fec-type", gst_webrtc::WebRTCFECType::UlpRed);
+        //     }
 
-            transceiver.set_property("do-nack", settings.do_retransmission);
-        }
+        //     transceiver.set_property("do-nack", settings.do_retransmission);
+        // }
 
         self.webrtc_pads.insert(
             stream.ssrc,
@@ -2198,15 +2198,15 @@ impl WebRTCSink {
 
         if let Some(mut consumer) = state.consumers.remove(&peer_id) {
             for webrtc_pad in consumer.webrtc_pads.clone().values() {
-                let transceiver = webrtc_pad
-                    .pad
-                    .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
+                // let transceiver = webrtc_pad
+                //     .pad
+                //     .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
 
-                if let Some(mid) = transceiver.mid() {
-                    state
-                        .mids
-                        .insert(mid.to_string(), webrtc_pad.stream_name.clone());
-                }
+                // if let Some(mid) = transceiver.mid() {
+                //     state
+                //         .mids
+                //         .insert(mid.to_string(), webrtc_pad.stream_name.clone());
+                // }
 
                 if let Some(stream) = state
                     .streams
@@ -2405,7 +2405,7 @@ impl WebRTCSink {
         gst::Element::link_many(elements_slice)
             .with_context(|| format!("Running discovery pipeline for caps {}", caps))?;
 
-        let (_, _, pay) = setup_encoding(&pipe.0, &capsfilter, caps, codec, None, true)?;
+        let (_, _, pay) = setup_encoding(&pipe.0, &capsfilter, caps, codec, None, false)?;
 
         let sink = make_element("fakesink", None)?;
 
@@ -2805,7 +2805,7 @@ impl ObjectImpl for WebRTCSink {
                                 for encoder in &mut consumer.encoders {
                                     encoder
                                         .set_bitrate(&self.instance(), consumer.max_bitrate as i32);
-                                    encoder.transceiver.set_property("fec-percentage", 50u32);
+                                    //encoder.transceiver.set_property("fec-percentage", 50u32);
                                 }
                                 consumer.stats_sigid.take();
                             }
