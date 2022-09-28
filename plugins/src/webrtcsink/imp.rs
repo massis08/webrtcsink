@@ -50,7 +50,7 @@ const DEFAULT_DO_FEC: bool = true;
 const DEFAULT_DO_RETRANSMISSION: bool = true;
 const DEFAULT_ENABLE_DATA_CHANNEL_NAVIGATION: bool = false;
 
-const DEFAULT_START_BITRATE: u32 = 2048000;
+const DEFAULT_BITRATE: u32 = 2048000;
 
 /// User configuration
 struct Settings {
@@ -61,7 +61,7 @@ struct Settings {
     cc_heuristic: WebRTCSinkCongestionControl,
     min_bitrate: u32,
     max_bitrate: u32,
-    start_bitrate: u32,
+    bitrate: u32,
     do_fec: bool,
     do_retransmission: bool,
     enable_data_channel_navigation: bool,
@@ -314,7 +314,7 @@ impl Default for Settings {
             turn_server: None,
             min_bitrate: DEFAULT_MIN_BITRATE,
             max_bitrate: DEFAULT_MAX_BITRATE,
-            start_bitrate: DEFAULT_START_BITRATE,
+            bitrate: DEFAULT_BITRATE,
             do_fec: DEFAULT_DO_FEC,
             do_retransmission: DEFAULT_DO_RETRANSMISSION,
             enable_data_channel_navigation: DEFAULT_ENABLE_DATA_CHANNEL_NAVIGATION,
@@ -430,12 +430,12 @@ fn make_converter_for_video_caps(caps: &gst::Caps) -> Result<gst::Element, Error
 
 /// Default configuration for known encoders, can be disabled
 /// by returning True from an encoder-setup handler.
-fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
+fn configure_encoder(enc: &gst::Element, bitrate: u32) {
     if let Some(factory) = enc.factory() {
         match factory.name().as_str() {
             "vp8enc" | "vp9enc" => {
                 enc.set_property("deadline", 1i64);
-                enc.set_property("target-bitrate", start_bitrate as i32);
+                enc.set_property("target-bitrate", bitrate as i32);
                 enc.set_property("cpu-used", -16i32);
                 enc.set_property("keyframe-max-dist", 2000i32);
                 enc.set_property_from_str("keyframe-mode", "disabled");
@@ -448,7 +448,7 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property("lag-in-frames", 0i32);
             }
             "x264enc" => {
-                enc.set_property("bitrate", start_bitrate / 1000);
+                enc.set_property("bitrate", bitrate / 1000);
                 enc.set_property_from_str("tune", "zerolatency");
                 enc.set_property_from_str("speed-preset", "ultrafast");
                 enc.set_property("threads", 12u32);
@@ -457,29 +457,28 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property("vbv-buf-capacity", 120u32);
             }
             "nvh264enc" => {
-                enc.set_property("bitrate", start_bitrate / 1000);
+                enc.set_property("bitrate", bitrate / 1000);
                 enc.set_property("gop-size", 2560i32);
                 enc.set_property_from_str("rc-mode", "cbr-ld-hq");
                 enc.set_property("zerolatency", true);
             }
             "vaapih264enc" | "vaapivp8enc" => {
-                enc.set_property("bitrate", start_bitrate / 1000);
+                enc.set_property("bitrate", bitrate / 1000);
                 enc.set_property("keyframe-period", 2560u32);
                 enc.set_property_from_str("rate-control", "cbr");
             }
             "nvv4l2h264enc" => {
-                enc.set_property("bitrate", 4096000u32);
+                enc.set_property("bitrate", bitrate);
                 enc.set_property("insert-sps-pps", true);
                 enc.set_property_from_str("preset-level", "UltraFastPreset");
                 enc.set_property("maxperf-enable", true);
                 enc.set_property("insert-vui", true);
                 enc.set_property("idrinterval", 256u32);
-                enc.set_property("insert-sps-pps", true);
                 enc.set_property("insert-aud", true);
                 enc.set_property_from_str("control-rate", "variable_bitrate");
             }
             "nvv4l2vp8enc" => {
-                enc.set_property("bitrate", 4096000u32);
+                enc.set_property("bitrate", bitrate);
                 enc.set_property_from_str("preset-level", "UltraFastPreset");
                 enc.set_property("maxperf-enable", true);
                 enc.set_property("idrinterval", 256u32);
@@ -653,8 +652,11 @@ impl VideoEncoder {
     fn bitrate(&self) -> i32 {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.property::<i32>("target-bitrate"),
-            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" | "nvv4l2h264enc" | "nvv4l2vp8enc" => {
+            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc"  => {
                 (self.element.property::<u32>("bitrate") * 1000) as i32
+            },
+            "nvv4l2h264enc" | "nvv4l2vp8enc" => {
+                (self.element.property::<u32>("bitrate")) as i32
             }
             factory => unimplemented!("Factory {} is currently not supported", factory),
         }
@@ -677,9 +679,12 @@ impl VideoEncoder {
     fn set_bitrate(&mut self, element: &super::WebRTCSink, bitrate: i32) {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.set_property("target-bitrate", bitrate),
-            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" | "nvv4l2h264enc" | "nvv4l2vp8enc" => self
+            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc"  => self
                 .element
                 .set_property("bitrate", (bitrate / 1000) as u32),
+            "nvv4l2h264enc" | "nvv4l2vp8enc" => self
+                .element
+                .set_property("bitrate", (bitrate) as u32),                
             factory => unimplemented!("Factory {} is currently not supported", factory),
         }
 
@@ -2705,12 +2710,12 @@ impl ObjectImpl for WebRTCSink {
                     glib::ParamFlags::READWRITE | gst::PARAM_FLAG_MUTABLE_READY,
                 ),
                 glib::ParamSpecUInt::new(
-                    "start-bitrate",
-                    "Start Bitrate",
-                    "Start bitrate to use (in bit/sec)",
+                    "bitrate",
+                    "Bitrate",
+                    "Bitrate to use (in bit/sec)",
                     1,
                     u32::MAX as u32,
-                    DEFAULT_START_BITRATE,
+                    DEFAULT_BITRATE,
                     glib::ParamFlags::READWRITE | gst::PARAM_FLAG_MUTABLE_READY,
                 ),
                 glib::ParamSpecBoxed::new(
@@ -2829,9 +2834,9 @@ impl ObjectImpl for WebRTCSink {
                 let mut settings = self.settings.lock().unwrap();
                 settings.max_bitrate = value.get::<u32>().expect("type checked upstream");
             }
-            "start-bitrate" => {
+            "bitrate" => {
                 let mut settings = self.settings.lock().unwrap();
-                settings.start_bitrate = value.get::<u32>().expect("type checked upstream");
+                settings.bitrate = value.get::<u32>().expect("type checked upstream");
             }
             "do-fec" => {
                 let mut settings = self.settings.lock().unwrap();
@@ -2886,9 +2891,9 @@ impl ObjectImpl for WebRTCSink {
                 let settings = self.settings.lock().unwrap();
                 settings.max_bitrate.to_value()
             }
-            "start-bitrate" => {
+            "bitrate" => {
                 let settings = self.settings.lock().unwrap();
-                settings.start_bitrate.to_value()
+                settings.bitrate.to_value()
             }
             "do-fec" => {
                 let settings = self.settings.lock().unwrap();
@@ -3009,7 +3014,7 @@ impl ObjectImpl for WebRTCSink {
 
                     let this = element.imp();
                     let settings = this.settings.lock().unwrap();
-                    configure_encoder(&enc, settings.start_bitrate);
+                    configure_encoder(&enc, settings.bitrate);
 
                     // Return false here so that latter handlers get called
                     Some(false.to_value())
