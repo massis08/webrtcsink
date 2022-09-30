@@ -91,8 +91,6 @@ struct InputStream {
     producer: Option<StreamProducer>,
     /// The (fixed) caps coming in
     in_caps: Option<gst::Caps>,
-    /// The caps we will offer, as a set of fixed structures
-    out_caps: Option<gst::Caps>,
     /// Pace input data
     clocksync: Option<gst::Element>,
     // Payload according being video or audio
@@ -1289,48 +1287,15 @@ impl Consumer {
     /// Request a sink pad on our webrtcbin, and set its transceiver's codec_preferences
     fn request_webrtcbin_pad(
         &mut self,
-        element: &super::WebRTCSink,
-        settings: &Settings,
+        _element: &super::WebRTCSink,
         stream: &InputStream,
     ) {
         let media_idx = self.webrtc_pads.len() as i32;
-
-        let mut payloader_caps = stream.out_caps.as_ref().unwrap().to_owned();
-
-        {
-            let payloader_caps_mut = payloader_caps.make_mut();
-            payloader_caps_mut.set_simple(&[("ssrc", &stream.ssrc)]);
-        }
-
-        gst::info!(
-            CAT,
-            obj: element,
-            "Requesting WebRTC pad for consumer {} with caps {}",
-            self.peer_id,
-            payloader_caps
-        );
 
         let pad = self
             .webrtcbin
             .request_pad_simple(&format!("sink_{}", media_idx))
             .unwrap();
-
-        // let transceiver = pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
-
-        // transceiver.set_property(
-        //     "direction",
-        //     gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-        // );
-
-        // transceiver.set_property("codec-preferences", &payloader_caps);
-
-        // if stream.sink_pad.name().starts_with("video_") {
-        //     if settings.do_fec {
-        //         transceiver.set_property("fec-type", gst_webrtc::WebRTCFECType::UlpRed);
-        //     }
-
-        //     transceiver.set_property("do-nack", settings.do_retransmission);
-        // }
 
         self.webrtc_pads.insert(
             stream.ssrc,
@@ -1482,7 +1447,6 @@ impl InputStream {
             .get(&payload)
             .ok_or_else(|| anyhow!("No codec for payload {}", payload))?;
 
-
         let appsrc = make_element("appsrc", Some(&self.sink_pad.name()))?;
         pipeline.add(&appsrc).unwrap();
 
@@ -1519,12 +1483,6 @@ impl InputStream {
 
         let appsrc = appsrc.downcast::<gst_app::AppSrc>().unwrap();
         gst_utils::StreamProducer::configure_consumer(&appsrc);
-
-        // pipeline.set_state(gst::State::Ready).map_err(|err| {
-        //     WebRTCSinkError::ProducerPipelineError {
-        //         details: err.to_string(),
-        //     }
-        // })?;
 
         let result = match self.producer.as_ref().unwrap().add_consumer(&appsrc) {
             Ok(link) => {
@@ -1689,7 +1647,7 @@ impl WebRTCSink {
             .chain(settings.audio_caps.iter())
             .filter_map(move |s| {
                 let caps = gst::Caps::builder_full().structure(s.to_owned()).build();
-
+                
                 Option::zip(
                     encoders
                         .iter()
@@ -2108,7 +2066,7 @@ impl WebRTCSink {
         state
             .streams
             .iter()
-            .for_each(|(_, stream)| consumer.request_webrtcbin_pad(element, &settings, stream));
+            .for_each(|(_, stream)| consumer.request_webrtcbin_pad(element, stream));
 
 
         if settings.enable_data_channel_navigation {
@@ -2339,40 +2297,7 @@ impl WebRTCSink {
                         });
                     }
                 }
-
-                // if let Some(payload) = sdp
-                //     .media(webrtc_pad.media_idx)
-                //     .and_then(|media| media.format(0))
-                //     .and_then(|format| format.parse::<i32>().ok())
-                // {
-                //     webrtc_pad.payload = Some(payload);
-                // } else {
-                //     gst::warning!(
-                //         CAT,
-                //         "consumer {} did not provide valid payload for media index {}",
-                //         peer_id,
-                //         media_idx
-                //     );
-
-                //     state.remove_consumer(element, peer_id, true);
-
-                //     return Err(WebRTCSinkError::ConsumerNoValidPayload {
-                //         peer_id: peer_id.to_string(),
-                //         media_idx,
-                //     });
-                // }
             }
-
-            //let element = element.downgrade();
-            //let peer_id = peer_id.to_string();
-
-            // let promise = gst::Promise::with_change_func(move |reply| {
-            //     gst::debug!(CAT, "received reply {:?}", reply);
-            //     // if let Some(element) = element.upgrade() {
-            //     //     let this = Self::from_instance(&element);
-            //     //     this.on_remote_description_set(&element, peer_id);
-            //     // }
-            // });
 
             consumer
                 .webrtcbin
@@ -2382,172 +2307,6 @@ impl WebRTCSink {
         } else {
             Err(WebRTCSinkError::NoConsumerWithId(peer_id.to_string()))
         }
-    }
-
-    async fn run_discovery_pipeline(
-        _element: &super::WebRTCSink,
-        codec: &Codec,
-        caps: &gst::Caps,
-    ) -> Result<gst::Structure, Error> {
-        let pipe = PipelineWrapper(gst::Pipeline::new(None));
-
-        let src = if codec.is_video() {
-            make_element("videotestsrc", None)?
-        } else {
-            make_element("audiotestsrc", None)?
-        };
-        let mut elements = vec![src.clone()];
-
-        if codec.is_video() {
-            elements.push(make_converter_for_video_caps(caps)?);
-        }
-
-        let capsfilter = make_element("capsfilter", None)?;
-        elements.push(capsfilter.clone());
-        let elements_slice = &elements.iter().collect::<Vec<_>>();
-        pipe.0.add_many(elements_slice).unwrap();
-        gst::Element::link_many(elements_slice)
-            .with_context(|| format!("Running discovery pipeline for caps {}", caps))?;
-
-        let (_, _, pay) = setup_encoding(&pipe.0, &capsfilter, caps, codec, None, false)?;
-
-        let sink = make_element("fakesink", None)?;
-
-        pipe.0.add(&sink).unwrap();
-
-        pay.link(&sink)
-            .with_context(|| format!("Running discovery pipeline for caps {}", caps))?;
-
-        capsfilter.set_property("caps", caps);
-
-        src.set_property("num-buffers", 1);
-
-        let mut stream = pipe.0.bus().unwrap().stream();
-
-        pipe.0
-            .set_state(gst::State::Playing)
-            .with_context(|| format!("Running discovery pipeline for caps {}", caps))?;
-
-        while let Some(msg) = stream.next().await {
-            match msg.view() {
-                gst::MessageView::Error(err) => {
-                    pipe.0.debug_to_dot_file_with_ts(
-                        gst::DebugGraphDetails::all(),
-                        "webrtcsink-discovery-error".to_string(),
-                    );
-                    return Err(err.error().into());
-                }
-                gst::MessageView::Eos(_) => {
-                    let caps = pay.static_pad("src").unwrap().current_caps().unwrap();
-
-                    pipe.0.debug_to_dot_file_with_ts(
-                        gst::DebugGraphDetails::all(),
-                        "webrtcsink-discovery-done".to_string(),
-                    );
-
-                    if let Some(s) = caps.structure(0) {
-                        let mut s = s.to_owned();
-                        s.remove_fields(&[
-                            "timestamp-offset",
-                            "seqnum-offset",
-                            "ssrc",
-                            "sprop-parameter-sets",
-                            "a-framerate",
-                        ]);
-                        s.set("payload", codec.payload);
-                        return Ok(s);
-                    } else {
-                        return Err(anyhow!("Discovered empty caps"));
-                    }
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        unreachable!()
-    }
-
-    async fn lookup_caps(
-        element: &super::WebRTCSink,
-        name: String,
-        in_caps: gst::Caps,
-        codecs: &BTreeMap<i32, Codec>,
-    ) -> (String, gst::Caps) {
-        let sink_caps = in_caps.as_ref().to_owned();
-
-        let is_video = match sink_caps.structure(0).unwrap().name() {
-            "video/x-raw" => true,
-            "audio/x-raw" => false,
-            _ => unreachable!(),
-        };
-
-        let mut payloader_caps = gst::Caps::new_empty();
-        let payloader_caps_mut = payloader_caps.make_mut();
-
-        let futs = codecs
-            .iter()
-            .filter(|(_, codec)| codec.is_video() == is_video)
-            .map(|(_, codec)| WebRTCSink::run_discovery_pipeline(element, codec, &sink_caps));
-
-        for ret in futures::future::join_all(futs).await {
-            match ret {
-                Ok(s) => {
-                    payloader_caps_mut.append_structure(s);
-                }
-                Err(err) => {
-                    /* We don't consider this fatal, as long as we end up with one
-                     * potential codec for each input stream
-                     */
-                    gst::warning!(
-                        CAT,
-                        obj: element,
-                        "Codec discovery pipeline failed: {}",
-                        err
-                    );
-                }
-            }
-        }
-
-        (name, payloader_caps)
-    }
-
-    async fn lookup_streams_caps(&self, element: &super::WebRTCSink) -> Result<(), Error> {
-        let codecs = self.lookup_codecs();
-        let futs: Vec<_> = self
-            .state
-            .lock()
-            .unwrap()
-            .streams
-            .iter()
-            .map(|(name, stream)| {
-                WebRTCSink::lookup_caps(
-                    element,
-                    name.to_owned(),
-                    stream.in_caps.as_ref().unwrap().to_owned(),
-                    &codecs,
-                )
-            })
-            .collect();
-
-        let caps: Vec<(String, gst::Caps)> = futures::future::join_all(futs).await;
-
-        let mut state = self.state.lock().unwrap();
-
-        for (name, caps) in caps {
-            if caps.is_empty() {
-                return Err(anyhow!("No caps found for stream {}", name));
-            }
-
-            if let Some(mut stream) = state.streams.get_mut(&name) {
-                stream.out_caps = Some(caps);
-            }
-        }
-
-        state.codecs = codecs;
-
-        Ok(())
     }
 
     fn gather_stats(&self) -> gst::Structure {
@@ -2580,9 +2339,9 @@ impl WebRTCSink {
 
                     let mut all_pads_have_caps = true;
 
-                    self.state
-                        .lock()
-                        .unwrap()
+                    let mut state = self.state.lock().unwrap();
+
+                    state
                         .streams
                         .iter_mut()
                         .for_each(|(_, mut stream)| {
@@ -2594,45 +2353,10 @@ impl WebRTCSink {
                         });
 
                     if all_pads_have_caps {
-                        let element_clone = element.downgrade();
-                        task::spawn(async move {
-                            if let Some(element) = element_clone.upgrade() {
-                                let this = Self::from_instance(&element);
-                                let (fut, handle) =
-                                    futures::future::abortable(this.lookup_streams_caps(&element));
-
-                                let (codecs_done_sender, codecs_done_receiver) =
-                                    futures::channel::oneshot::channel();
-
-                                // Compiler isn't budged by dropping state before await,
-                                // so let's make a new scope instead.
-                                {
-                                    let mut state = this.state.lock().unwrap();
-                                    state.codecs_abort_handle = Some(handle);
-                                    state.codecs_done_receiver = Some(codecs_done_receiver);
-                                }
-
-                                match fut.await {
-                                    Ok(Err(err)) => {
-                                        gst::error!(CAT, obj: &element, "error: {}", err);
-                                        gst::element_error!(
-                                            element,
-                                            gst::StreamError::CodecNotFound,
-                                            ["Failed to look up output caps: {}", err]
-                                        );
-                                    }
-                                    Ok(Ok(_)) => {
-                                        let mut state = this.state.lock().unwrap();
-                                        state.codec_discovery_done = true;
-                                        this.prepare_pipeline(&element, &mut state);
-                                        state.maybe_start_signaller(&element);
-                                    }
-                                    _ => (),
-                                }
-
-                                let _ = codecs_done_sender.send(());
-                            }
-                        });
+                        state.codecs = self.lookup_codecs();
+                        state.codec_discovery_done = true;
+                        self.prepare_pipeline(&element, &mut state);
+                        state.maybe_start_signaller(&element);
                     }
 
                     pad.event_default(Some(element), event)
@@ -3136,7 +2860,6 @@ impl ElementImpl for WebRTCSink {
                 sink_pad: sink_pad.clone(),
                 producer: None,
                 in_caps: None,
-                out_caps: None,
                 clocksync: None,
                 payload: Some(payload.clone()),
                 tee: None,
