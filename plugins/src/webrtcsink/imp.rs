@@ -74,7 +74,7 @@ struct Codec {
     encoder: gst::ElementFactory,
     payloader: gst::ElementFactory,
     caps: gst::Caps,
-    payload: i32,
+    _payload: i32,
 }
 
 impl Codec {
@@ -219,7 +219,7 @@ struct State {
     signaller: Box<dyn super::SignallableObject>,
     signaller_state: SignallerState,
     consumers: HashMap<String, Consumer>,
-    codecs: BTreeMap<i32, Codec>,
+    codecs: BTreeMap<String, Codec>,
     /// Used to abort codec discovery
     codecs_abort_handle: Option<futures::future::AbortHandle>,
     /// Used to wait for the discovery task to fully stop
@@ -299,14 +299,8 @@ pub struct WebRTCSink {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            video_caps: ["video/x-vp8", "video/x-h264", "video/x-vp9", "video/x-h265"]
-                .iter()
-                .map(|s| gst::Structure::new_empty(s))
-                .collect::<gst::Caps>(),
-            audio_caps: ["audio/x-opus"]
-                .iter()
-                .map(|s| gst::Structure::new_empty(s))
-                .collect::<gst::Caps>(),
+            video_caps: gst::Caps::new_empty(),
+            audio_caps: gst::Caps::new_empty(),
             cc_heuristic: WebRTCSinkCongestionControl::Homegrown,
             stun_server: DEFAULT_STUN_SERVER.map(String::from),
             turn_server: None,
@@ -1440,12 +1434,19 @@ impl InputStream {
 
     }
 
-    fn create_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
-        let payload = self.payload.unwrap();
-        
+    fn create_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<String, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>, stream_name: &String) -> Result<(), Error> {
+
+        let get_codec = if stream_name.starts_with("video") {
+            "video"
+        } else {
+            "audio"
+        };
+
         let codec = codecs
-            .get(&payload)
-            .ok_or_else(|| anyhow!("No codec for payload {}", payload))?;
+            .get(get_codec)
+            .ok_or_else(|| anyhow!("No codec for {}", stream_name))?;
+
+        gst::info!(CAT, "ROXO {:?}", codec.caps);    
 
         let appsrc = make_element("appsrc", Some(&self.sink_pad.name()))?;
         pipeline.add(&appsrc).unwrap();
@@ -1540,8 +1541,8 @@ impl WebRTCSink {
 
     fn prepare_pipeline(&self, element: &super::WebRTCSink, state: &mut State) {
         let mut streams = state.streams.clone();
-        streams.iter_mut().for_each(|(_, stream )| {         
-                if let Err(err) = stream.create_pipeline(&element, &state.pipeline, &state.codecs, &mut state.links) {
+        streams.iter_mut().for_each(|(stream_name, stream )| {         
+                if let Err(err) = stream.create_pipeline(&element, &state.pipeline, &state.codecs, &mut state.links, &stream_name) {
                     gst::error!(CAT, obj: element, "error creating main pipeline for producer: {}", err);
                     gst::element_error!(
                         element,
@@ -1623,8 +1624,8 @@ impl WebRTCSink {
 
     }
 
-    /// Build an ordered map of Codecs, given user-provided audio / video caps */
-    fn lookup_codecs(&self) -> BTreeMap<i32, Codec> {
+    fn get_codec_from_caps(&self, caps: &gst::Caps, payload: i32) -> Option<Codec>{
+
         /* First gather all encoder and payloader factories */
         let encoders = gst::ElementFactory::factories_with_type(
             gst::ElementFactoryType::ENCODER,
@@ -1635,46 +1636,53 @@ impl WebRTCSink {
             gst::ElementFactoryType::PAYLOADER,
             gst::Rank::Marginal,
         );
-
-        /* Now iterate user-provided codec preferences and determine
-         * whether we can fulfill these preferences */
-        let settings = self.settings.lock().unwrap();
-        let mut payload = 96..128;
-
-        settings
-            .video_caps
-            .iter()
-            .chain(settings.audio_caps.iter())
-            .filter_map(move |s| {
-                let caps = gst::Caps::builder_full().structure(s.to_owned()).build();
-                
-                Option::zip(
-                    encoders
-                        .iter()
-                        .find(|factory| factory.can_src_any_caps(&caps)),
-                    payloaders
-                        .iter()
-                        .find(|factory| factory.can_sink_any_caps(&caps)),
-                )
-                .and_then(|(encoder, payloader)| {
-                    /* Assign a payload type to the codec */
-                    if let Some(pt) = payload.next() {
-                        Some(Codec {
-                            encoder: encoder.clone(),
-                            payloader: payloader.clone(),
-                            caps,
-                            payload: pt,
-                        })
-                    } else {
-                        gst::warning!(CAT, obj: &self.instance(),
-                                "Too many formats for available payload type range, ignoring {}",
-                                s);
-                        None
-                    }
-                })
+        Option::zip(
+            encoders
+                .iter()
+                .find(|factory| factory.can_src_any_caps(caps)),
+            payloaders
+                .iter()
+                .find(|factory| factory.can_sink_any_caps(caps)),
+        )
+        .and_then(|(encoder, payloader)| {
+            Some(Codec {
+                encoder: encoder.clone(),
+                payloader: payloader.clone(),
+                caps: caps.to_owned(),
+                _payload: payload,
             })
-            .map(|codec| (codec.payload, codec))
-            .collect()
+            
+        })
+    }
+
+    /// Build an ordered map of Codecs, given user-provided audio / video caps */
+    fn lookup_codecs(&self, element: &super::WebRTCSink,) -> BTreeMap<String, Codec> {
+
+        let settings = self.settings.lock().unwrap();
+
+        if settings.video_caps.is_empty() && settings.audio_caps.is_empty() {
+            gst::error!(CAT, obj: element, "No video caps or audio were given!");
+
+            gst::element_error!(
+                element,
+                gst::StreamError::Failed,
+                ["No video caps or audio were given!"]
+            );
+        }
+
+        let mut codecs: BTreeMap<String, Codec>  = BTreeMap::new();
+
+        if !settings.video_caps.is_empty() {
+            codecs.insert("video".to_string(), self.get_codec_from_caps(&settings.video_caps, 96).unwrap());
+        }
+
+        if !settings.audio_caps.is_empty() {
+            codecs.insert("audio".to_string(), self.get_codec_from_caps(&settings.audio_caps, 97).unwrap());
+        }
+
+        codecs
+  
+        
     }
 
     /// Prepare for accepting consumers, by setting
@@ -2353,7 +2361,7 @@ impl WebRTCSink {
                         });
 
                     if all_pads_have_caps {
-                        state.codecs = self.lookup_codecs();
+                        state.codecs = self.lookup_codecs(&element);
                         state.codec_discovery_done = true;
                         self.prepare_pipeline(&element, &mut state);
                         state.maybe_start_signaller(&element);
