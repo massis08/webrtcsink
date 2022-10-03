@@ -395,6 +395,8 @@ fn setup_encoding(
         .with_context(|| format!("Creating payloader {}", codec.payloader.name()))?;
     let parse_filter = make_element("capsfilter", None)?;
 
+    pay.set_property("mtu", 1200 as u32);
+
     if let Some(ssrc) = ssrc {
         pay.set_property("ssrc", ssrc);
     }
@@ -957,8 +959,7 @@ impl WebRTCSink {
                                     pipeline.debug_to_dot_file_with_ts(
                                         gst::DebugGraphDetails::all(),
                                         format!(
-                                            "webrtcsink-producer-peer-{:?}-{:?}-to-{:?}",
-                                            this.settings.lock().unwrap().display_name.clone().unwrap().to_string(),
+                                            "webrtcsink-producer-{:?}-to-{:?}",
                                             state_changed.old(),
                                             state_changed.current()
                                         ),
