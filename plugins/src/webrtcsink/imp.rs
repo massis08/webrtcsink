@@ -580,9 +580,9 @@ impl State {
 
         }
 
-        let test = self.pipeline.downgrade();
+        let pipeline_clone = self.pipeline.downgrade();
         consumer.webrtcbin.call_async( move |webrtcbin| {
-            let pipeline = test.upgrade().unwrap();
+            let pipeline = pipeline_clone.upgrade().unwrap();
             
             if webrtcbin.set_state(gst::State::Null).is_err() {
                 gst::info!(
@@ -1465,16 +1465,6 @@ impl WebRTCSink {
 
         if let Some(mut consumer) = state.consumers.remove(&peer_id) {
             for webrtc_pad in consumer.webrtc_pads.clone().values() {
-                // let transceiver = webrtc_pad
-                //     .pad
-                //     .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
-
-                // if let Some(mid) = transceiver.mid() {
-                //     state
-                //         .mids
-                //         .insert(mid.to_string(), webrtc_pad.stream_name.clone());
-                // }
-
                 if let Some(stream) = state
                     .streams
                     .get(&webrtc_pad.stream_name) {
