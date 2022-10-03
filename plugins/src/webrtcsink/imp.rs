@@ -175,9 +175,6 @@ pub fn make_element(element: &str, name: Option<&str>) -> Result<gst::Element, E
         .with_context(|| format!("Failed to make element {}", element))
 }
 
-/// Simple utility for tearing down a pipeline cleanly
-struct PipelineWrapper(gst::Pipeline);
-
 // Structure to generate GstNavigation event from a WebRTCDataChannel
 // This is simply used to hold references to the inner items.
 #[derive(Debug)]
@@ -397,8 +394,6 @@ fn setup_encoding(
         .create(None)
         .with_context(|| format!("Creating payloader {}", codec.payloader.name()))?;
     let parse_filter = make_element("capsfilter", None)?;
-
-    //pay.set_property("pt", codec.payload as u32);
 
     if let Some(ssrc) = ssrc {
         pay.set_property("ssrc", ssrc);
@@ -733,12 +728,6 @@ impl Consumer {
         tee_pad.remove_probe(tee_block);
                
         Ok(())
-    }
-}
-
-impl Drop for PipelineWrapper {
-    fn drop(&mut self) {
-        let _ = self.0.set_state(gst::State::Null);
     }
 }
 
