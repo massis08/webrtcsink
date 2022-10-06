@@ -82,6 +82,8 @@ struct InputStream {
     tee: Option<gst::Element>,
     /// Saves ssrc for all the consumers
     ssrc: u32,
+    /// For transceiver codec preferences
+    codec_preferences: Option<gst::Caps>,
 }
 
 /// Wrapper around webrtcbin pads
@@ -670,6 +672,15 @@ impl Consumer {
             .request_pad_simple(&format!("sink_{}", media_idx))
             .unwrap();
 
+        let transceiver = pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
+
+        transceiver.set_property(
+            "direction",
+            gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+        );
+
+        transceiver.set_property("codec-preferences", &stream.codec_preferences.as_ref().unwrap());    
+
         self.webrtc_pads.insert(
             stream.ssrc,
             WebRTCPad {
@@ -788,7 +799,8 @@ impl InputStream {
             .field("payload", payload); 
         if self.sink_pad.name().starts_with("video_") {
             struct_caps_pay = struct_caps_pay.field("media", "video")
-                .field("clock-rate", 90000 as i32);
+                .field("clock-rate", 90000 as i32)
+                .field("ssrc", self.ssrc as u32);
             struct_caps_pay = match codec_name {
                 "video/x-h265" => struct_caps_pay.field("encoding-name", "H265"),
                 "video/x-h264" => struct_caps_pay.field("encoding-name", "H264"),
@@ -800,7 +812,10 @@ impl InputStream {
         } else{
             struct_caps_pay = struct_caps_pay.field("media", "audio")
                 .field("clock-rate", 48000 as i32)
-                .field("encoding-name", "OPUS");
+                .field("encoding-name", "OPUS")
+                .field("encoding-params", "2")
+                .field("minptime", "10")
+                .field("ssrc", self.ssrc as u32);
         }
 
         gst::Caps::builder_full().structure(struct_caps_pay.build()).build()
@@ -817,9 +832,7 @@ impl InputStream {
 
         let codec = codecs
             .get(get_codec)
-            .ok_or_else(|| anyhow!("No codec for {}", stream_name))?;
-
-        gst::info!(CAT, "ROXO {:?}", codec.caps);    
+            .ok_or_else(|| anyhow!("No codec for {}", stream_name))?;  
 
         let appsrc = make_element("appsrc", Some(&self.sink_pad.name()))?;
         pipeline.add(&appsrc).unwrap();
@@ -853,7 +866,7 @@ impl InputStream {
         );
 
         let caps = self.create_caps_for_pay_filter(codec.caps.structure(0).unwrap().name());
-        pay_filter.set_property("caps", caps);
+        pay_filter.set_property("caps", caps.clone());
 
         let appsrc = appsrc.downcast::<gst_app::AppSrc>().unwrap();
         gst_utils::StreamProducer::configure_consumer(&appsrc);
@@ -874,6 +887,7 @@ impl InputStream {
         .with_context(|| "Linking encoding elements")?;
 
         self.tee = Some(tee);
+        self.codec_preferences = Some(caps.clone());
 
         result
     }
@@ -1997,6 +2011,7 @@ impl ElementImpl for WebRTCSink {
                 payload: Some(payload.clone()),
                 tee: None,
                 ssrc: srrc,
+                codec_preferences: None,
             },
         );
 
