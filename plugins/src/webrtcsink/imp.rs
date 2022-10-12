@@ -1,4 +1,3 @@
-use anyhow::Context;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
@@ -10,13 +9,14 @@ use gst_webrtc::WebRTCDataChannel;
 use async_std::task;
 use futures::prelude::*;
 
-use anyhow::{anyhow, Error};
+use anyhow::Error;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use super::WebRTCSinkError;
 use crate::signaller::Signaller;
+use crate::utils::*;
 use std::collections::BTreeMap;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
@@ -170,13 +170,6 @@ fn create_navigation_event(sink: &super::WebRTCSink, msg: &str) {
     }
 }
 
-/// Wrapper around `gst::ElementFactory::make` with a better error
-/// message
-pub fn make_element(element: &str, name: Option<&str>) -> Result<gst::Element, Error> {
-    gst::ElementFactory::make(element, name)
-        .with_context(|| format!("Failed to make element {}", element))
-}
-
 // Structure to generate GstNavigation event from a WebRTCDataChannel
 // This is simply used to hold references to the inner items.
 #[derive(Debug)]
@@ -226,82 +219,90 @@ impl Default for State {
     }
 }
 
-fn make_converter_for_video_caps(caps: &gst::Caps) -> Result<gst::Element, Error> {
+fn make_converter_for_video_caps(caps: &gst::Caps) -> Result<gst::Element, WebRTCSinkError> {
+    let error_called_from = "making converter for video caps";
+    
     assert!(caps.is_fixed());
 
-    let video_info = gst_video::VideoInfo::from_caps(&caps)?;
+    let video_info = match gst_video::VideoInfo::from_caps(&caps) {
+        Ok(caps) => Ok(caps),
+        Err(error) => Err(WebRTCSinkError::ProducerPipelineError {
+            details: error.to_string(),
+        }),
+    }?;
 
     let ret = gst::Bin::new(None);
 
     let (head, mut tail) = {
         if let Some(feature) = caps.features(0) {
             if feature.contains(CUDA_MEMORY_FEATURE) {
-                let cudaupload = make_element("cudaupload", None)?;
-                let cudaconvert = make_element("cudaconvert", None)?;
-                let cudascale = make_element("cudascale", None)?;
+                let cudaupload = webrtcsink_producer_error_or_ok(gstreamer_create_element("cudaupload", None, error_called_from))?;
+                let cudaconvert = webrtcsink_producer_error_or_ok(gstreamer_create_element("cudaconvert", None, error_called_from))?;
+                let cudascale = webrtcsink_producer_error_or_ok(gstreamer_create_element("cudascale", None, error_called_from))?;
 
-                ret.add_many(&[&cudaupload, &cudaconvert, &cudascale])?;
-                gst::Element::link_many(&[&cudaupload, &cudaconvert, &cudascale])?;
+                webrtcsink_producer_error_or_ok(gstreamer_bin_add_many(&[&cudaupload, &cudaconvert, &cudascale], &ret, error_called_from))?;
+                webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&cudaupload, &cudaconvert, &cudascale], error_called_from))?;
 
                 (cudaupload, cudascale)
             } else if feature.contains(GL_MEMORY_FEATURE) {
-                let glupload = make_element("glupload", None)?;
-                let glconvert = make_element("glcolorconvert", None)?;
-                let glscale = make_element("glcolorscale", None)?;
+                let glupload = webrtcsink_producer_error_or_ok(gstreamer_create_element("glupload", None, error_called_from))?;
+                let glconvert = webrtcsink_producer_error_or_ok(gstreamer_create_element("glcolorconvert", None, error_called_from))?;
+                let glscale = webrtcsink_producer_error_or_ok(gstreamer_create_element("glcolorscale", None, error_called_from))?;
 
-                ret.add_many(&[&glupload, &glconvert, &glscale])?;
-                gst::Element::link_many(&[&glupload, &glconvert, &glscale])?;
+                webrtcsink_producer_error_or_ok(gstreamer_bin_add_many(&[&glupload, &glconvert, &glscale], &ret, error_called_from))?;
+                webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&glupload, &glconvert, &glscale], error_called_from))?;
 
                 (glupload, glscale)
             } else if feature.contains(NVMM_MEMORY_FEATURE) {
-                let queue = make_element("queue", None)?;
-                let nvconvert = make_element("nvvideoconvert", None)?;
+                let queue = webrtcsink_producer_error_or_ok(gstreamer_create_element("queue", None, error_called_from))?;
+                let nvconvert = webrtcsink_producer_error_or_ok(gstreamer_create_element("nvvideoconvert", None, error_called_from))?;
                 nvconvert.set_property_from_str("compute-hw", "VIC");
                 nvconvert.set_property_from_str("nvbuf-memory-type", "nvbuf-mem-surface-array");
 
-                ret.add_many(&[&queue, &nvconvert])?;
-                gst::Element::link_many(&[&queue, &nvconvert])?;
+                webrtcsink_producer_error_or_ok(gstreamer_bin_add_many(&[&queue, &nvconvert], &ret, error_called_from))?;
+                webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&queue, &nvconvert], error_called_from))?;
 
                 (queue, nvconvert)
             } else {
-                let convert = make_element("videoconvert", None)?;
-                let scale = make_element("videoscale", None)?;
+                let convert = webrtcsink_producer_error_or_ok(gstreamer_create_element("videoconvert", None, error_called_from))?;
+                let scale = webrtcsink_producer_error_or_ok(gstreamer_create_element("videoscale", None, error_called_from))?;
 
-                ret.add_many(&[&convert, &scale])?;
-                gst::Element::link_many(&[&convert, &scale])?;
+                webrtcsink_producer_error_or_ok(gstreamer_bin_add_many(&[&convert, &scale], &ret, error_called_from))?;
+                webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&convert, &scale], error_called_from))?;
 
                 (convert, scale)
             }
         } else {
-            let convert = make_element("videoconvert", None)?;
-            let scale = make_element("videoscale", None)?;
+            let convert = webrtcsink_producer_error_or_ok(gstreamer_create_element("videoconvert", None, error_called_from))?;
+            let scale = webrtcsink_producer_error_or_ok(gstreamer_create_element("videoscale", None, error_called_from))?;
 
-            ret.add_many(&[&convert, &scale])?;
-            gst::Element::link_many(&[&convert, &scale])?;
+            webrtcsink_producer_error_or_ok(gstreamer_bin_add_many(&[&convert, &scale], &ret, error_called_from))?;
+            webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&convert, &scale], error_called_from))?;
 
             (convert, scale)
         }
     };
 
-    ret.add_pad(
-        &gst::GhostPad::with_target(Some("sink"), &head.static_pad("sink").unwrap()).unwrap(),
-    )
-    .unwrap();
+    let bin_element = ret.upcast_ref::<gst::Element>();
+
+    let head_sink_ghost_pad = webrtcsink_producer_error_or_ok(gstreamer_get_ghost_pad(&head, "sink", error_called_from))?;
+
+    webrtcsink_producer_error_or_ok(gstreamer_add_ghost_pad(&bin_element, &head_sink_ghost_pad, error_called_from))?;
 
     if video_info.fps().numer() != 0 {
-        let vrate = make_element("videorate", None)?;
+        let vrate = webrtcsink_producer_error_or_ok(gstreamer_create_element("videorate", None, error_called_from))?;
         vrate.set_property("drop-only", true);
         vrate.set_property("skip-to-first", true);
 
-        ret.add(&vrate)?;
-        tail.link(&vrate)?;
+        webrtcsink_producer_error_or_ok(gstreamer_bin_add(&vrate, &ret, error_called_from))?;
+        webrtcsink_producer_error_or_ok(gstreamer_link(&tail, &vrate, error_called_from))?;
+
         tail = vrate;
     }
 
-    ret.add_pad(
-        &gst::GhostPad::with_target(Some("src"), &tail.static_pad("src").unwrap()).unwrap(),
-    )
-    .unwrap();
+    let tail_src_ghost_pad = webrtcsink_producer_error_or_ok(gstreamer_get_ghost_pad(&tail, "src", error_called_from))?;
+
+    webrtcsink_producer_error_or_ok(gstreamer_add_ghost_pad(&bin_element, &tail_src_ghost_pad, error_called_from))?;
 
     Ok(ret.upcast())
 }
@@ -377,25 +378,23 @@ fn setup_encoding(
     codec: &Codec,
     ssrc: Option<u32>,
     twcc: bool,
-) -> Result<(gst::Element, gst::Element, gst::Element), Error> {
+) -> Result<(gst::Element, gst::Element, gst::Element), WebRTCSinkError> {
+
+    let error_called_from = "setting up encoding";
     let conv = match codec.is_video() {
         true => make_converter_for_video_caps(input_caps)?.upcast(),
-        false => gst::parse_bin_from_description("audioresample ! audioconvert", true)?.upcast(),
+        false => webrtcsink_producer_error_or_ok(gstreamer_create_bin_from_description("audioresample ! audioconvert", true, error_called_from))?.upcast(),
     };
 
-    let conv_filter = make_element("capsfilter", None)?;
+    let conv_filter = webrtcsink_producer_error_or_ok(gstreamer_create_element("capsfilter", None, error_called_from))?;
 
-    let queue = make_element("queue", None)?;
+    let queue = webrtcsink_producer_error_or_ok(gstreamer_create_element("queue", None, error_called_from))?;
 
-    let enc = codec
-        .encoder
-        .create(None)
-        .with_context(|| format!("Creating encoder {}", codec.encoder.name()))?;
-    let pay = codec
-        .payloader
-        .create(None)
-        .with_context(|| format!("Creating payloader {}", codec.payloader.name()))?;
-    let parse_filter = make_element("capsfilter", None)?;
+    let enc = webrtcsink_producer_error_or_ok(gstreamer_create_element_from_factory(&codec.encoder, None, error_called_from))?;
+
+    let pay = webrtcsink_producer_error_or_ok(gstreamer_create_element_from_factory(&codec.payloader, None, error_called_from))?;
+    
+    let parse_filter = webrtcsink_producer_error_or_ok(gstreamer_create_element("capsfilter", None, error_called_from))?;
 
     pay.set_property("mtu", 1200 as u32);
 
@@ -403,27 +402,25 @@ fn setup_encoding(
         pay.set_property("ssrc", ssrc);
     }
 
-    pipeline
-        .add_many(&[&conv, &conv_filter, &queue, &enc, &parse_filter, &pay])
-        .unwrap();
-    gst::Element::link_many(&[src, &conv, &conv_filter, &queue, &enc])
-        .with_context(|| "Linking encoding elements")?;
+    webrtcsink_producer_error_or_ok(gstreamer_add_many(&[&conv, &conv_filter, &queue, &enc, &parse_filter, &pay], &pipeline, error_called_from))?;
 
-    let codec_name = codec.caps.structure(0).unwrap().name();
+    webrtcsink_producer_error_or_ok(gstreamer_link_many(&[src, &conv, &conv_filter, &queue, &enc], error_called_from))?;
+
+    let codec_name = webrtcsink_producer_some_or_none(codec.caps.structure(0), "Could not get codec caps when setting up encoding")?.name();
 
     if let Some(parser) = if codec_name == "video/x-h264" {
-        Some(make_element("h264parse", None)?)
+        Some(webrtcsink_producer_error_or_ok(gstreamer_create_element("h264parse", None, error_called_from))?)
     } else if codec_name == "video/x-h265" {
-        Some(make_element("h265parse", None)?)
+        Some(webrtcsink_producer_error_or_ok(gstreamer_create_element("h265parse", None, error_called_from))?)
     } else {
         None
     } {
-        pipeline.add(&parser).unwrap();
-        gst::Element::link_many(&[&enc, &parser, &parse_filter])
-            .with_context(|| "Linking encoding elements")?;
+        webrtcsink_producer_error_or_ok(gstreamer_add(&parser, &pipeline, error_called_from))?;
+
+        webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&enc, &parser, &parse_filter], error_called_from))?;
+
     } else {
-        gst::Element::link_many(&[&enc, &parse_filter])
-            .with_context(|| "Linking encoding elements")?;
+        webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&enc, &parse_filter], error_called_from))?;
     }
 
     let conv_caps = if codec.is_video() {
@@ -483,7 +480,7 @@ fn setup_encoding(
 
     parse_filter.set_property("caps", parse_caps);
 
-    gst::Element::link_many(&[&parse_filter, &pay]).with_context(|| "Linking encoding elements")?;
+    webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&parse_filter, &pay], error_called_from))?;
 
     Ok((enc, conv_filter, pay))
 }
@@ -664,13 +661,12 @@ impl Consumer {
         &mut self,
         _element: &super::WebRTCSink,
         stream: &InputStream,
-    ) {
+    ) -> Result<(), WebRTCSinkError> {
         let media_idx = self.webrtc_pads.len() as i32;
 
-        let pad = self
-            .webrtcbin
-            .request_pad_simple(&format!("sink_{}", media_idx))
-            .unwrap();
+        let pad = webrtcsink_consumer_error_or_ok(
+            gstreamer_request_simple_pad(&self.webrtcbin, &format!("sink_{}", media_idx),
+                                        "requesting webrtcbin pad"), &self.peer_id)?;
 
         let transceiver = pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
 
@@ -679,7 +675,15 @@ impl Consumer {
             gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
         );
 
-        transceiver.set_property("codec-preferences", &stream.codec_preferences.as_ref().unwrap());    
+        let codec_preferences = match stream.codec_preferences.as_ref() {
+            Some(codec_preferences) => Ok(codec_preferences),
+            None => Err(WebRTCSinkError::ConsumerPipelineError{
+                peer_id: self.peer_id.to_string(),
+                details: "could not get codec preferences when requesting webrtcbin pad".to_string(),
+            })
+        }?;
+
+        transceiver.set_property("codec-preferences", codec_preferences);    
 
         self.webrtc_pads.insert(
             stream.ssrc,
@@ -689,6 +693,7 @@ impl Consumer {
                 stream_name: stream.sink_pad.name().to_string(),
             },
         );
+        Ok(())
     }
 
     /// Called when we have received an answer, connects an InputStream
@@ -699,7 +704,9 @@ impl Consumer {
         webrtc_pad: &WebRTCPad,
         stream: &InputStream,
         pipeline: &gst::Pipeline,
-    ) -> Result<(), Error> {
+    ) -> Result<(), WebRTCSinkError> {
+
+        let error_called_from = "connecting input stream";
 
         gst::info!(
             CAT,
@@ -709,35 +716,42 @@ impl Consumer {
             self.peer_id
         );
 
+        let tee = match stream.tee.as_ref() {
+            Some(tee) => Ok(tee),
+            None => Err(WebRTCSinkError::ConsumerPipelineError { 
+                peer_id: self.peer_id.to_string(), 
+                details: "Failed to get tee in connect input stream".to_string()
+            })
+        }?;
 
-        let pad_template = stream.tee.as_ref().unwrap().pad_template("src_%u").unwrap();
-        let tee_pad = stream.tee.as_ref().unwrap().request_pad(&pad_template, None, None).unwrap();
+        let tee_pad = webrtcsink_consumer_error_or_ok(
+            gstreamer_request_pad_with_pad_template(tee, "src_%u", error_called_from), &self.peer_id)?;
         
-        let tee_block = tee_pad
+        let tee_block = webrtcsink_consumer_some_or_none(tee_pad
             .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
                 gst::PadProbeReturn::Ok
-            })
-            .unwrap();
+            }), &self.peer_id.to_string(), error_called_from)?;
 
-        let queue = make_element("queue", None)?;
-        pipeline.add(&queue).unwrap();
-        let queue_src = queue.static_pad("src").unwrap();
+        let queue = webrtcsink_consumer_error_or_ok(
+                gstreamer_create_element("queue", None, error_called_from), &self.peer_id)?;
+
+
+        webrtcsink_consumer_error_or_ok(
+            gstreamer_add(&queue, &pipeline, error_called_from), &self.peer_id)?;        
+
+        let queue_src = webrtcsink_consumer_error_or_ok(
+                gstreamer_get_static_pad(&queue, "src", error_called_from), &self.peer_id
+        )?;
         
-        queue.sync_state_with_parent().unwrap();
 
-        if self.webrtcbin.sync_state_with_parent().is_err() {
-            gst::error!(
-                CAT,
-                obj: &self.webrtcbin,
-                "Failed to set webrtcbin to Playing"
-            );
-        }
+        webrtcsink_consumer_error_or_ok(gstreamer_sycn_state_with_parent(&queue, error_called_from), &self.peer_id)?;
 
-        stream.tee.as_ref().unwrap().link(&queue)?;
+        webrtcsink_consumer_error_or_ok(gstreamer_sycn_state_with_parent(&self.webrtcbin, error_called_from), &self.peer_id)?;
 
-        queue_src.link(&webrtc_pad.pad)
-            .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
-        
+        webrtcsink_consumer_error_or_ok(gstreamer_link(&tee, &queue, error_called_from), &self.peer_id)?;
+
+        webrtcsink_consumer_error_or_ok(gstreamer_link_pads(&queue_src, &webrtc_pad.pad, error_called_from), &self.peer_id)?;
+
         tee_pad.remove_probe(tee_block);
                
         Ok(())
@@ -747,28 +761,41 @@ impl Consumer {
 impl InputStream {
 
     /// Called when transitioning state up to Paused
-    fn prepare(&mut self, element: &super::WebRTCSink) -> Result<(), Error> {
-        let clocksync = make_element("clocksync", None)?;
-        let appsink = make_element("appsink", None)?
-            .downcast::<gst_app::AppSink>()
-            .unwrap();
+    fn prepare(&mut self, element: &super::WebRTCSink) -> Result<(), WebRTCSinkError> {
+        let error_called_from = format!("preparing stream {:?}", &self.sink_pad.name());
+
+        let clocksync = webrtcsink_prepare_error_or_ok(gstreamer_create_element("clocksync", None, &error_called_from))?;
+        let appsink = webrtcsink_prepare_error_or_ok(gstreamer_create_element("appsink", None, &error_called_from))?;
+
         appsink.set_property("drop", true);
         appsink.set_property("emit-signals", true);
-        element.add(&clocksync).unwrap();
-        element.add(&appsink).unwrap();
 
-        clocksync
-            .link(&appsink)
-            .with_context(|| format!("Linking input stream {}", self.sink_pad.name()))?;
+        match element.add(&clocksync) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(WebRTCSinkError::PrepareWebrtcsinkError {
+                details: format!("Failed adding clocksync to webrtcsink: {:?}", error),
+            })
+        }?;
 
-        element
-            .sync_children_states()
-            .with_context(|| format!("Linking input stream {}", self.sink_pad.name()))?;
+        match element.add(&appsink) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(WebRTCSinkError::PrepareWebrtcsinkError {
+                details: format!("Failed adding appsink to webrtcsink: {:?}", error),
+            })
+        }?;
 
-        self.sink_pad
-            .set_target(Some(&clocksync.static_pad("sink").unwrap()))
-            .unwrap();
+        webrtcsink_prepare_error_or_ok(gstreamer_link(&clocksync, &appsink, &error_called_from))?;
 
+        match element.sync_children_states(){
+            Ok(_) => Ok(()),
+            Err(error) => Err(WebRTCSinkError::PrepareWebrtcsinkError {
+                details: format!("Failed syncing children of webrtcsink: {:?}", error),
+            })
+        }?;
+
+        webrtcsink_prepare_error_or_ok(gstreamer_ghost_pad_set_target(&clocksync, &self.sink_pad, "sink", &error_called_from))?;
+        
+        let appsink = appsink.downcast::<gst_app::AppSink>().unwrap();
         let producer = StreamProducer::from(&appsink);
         producer.forward();
         self.producer = Some(producer);
@@ -822,39 +849,38 @@ impl InputStream {
 
     }
 
-    fn create_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<String, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>, stream_name: &String) -> Result<(), Error> {
+    fn create_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<String, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>, stream_name: &String) -> Result<(), WebRTCSinkError> {
+
+        let error_called_from = "creating producer pipeline";
 
         let get_codec = if stream_name.starts_with("video") {
             "video"
         } else {
             "audio"
         };
+        
+        let codec = webrtcsink_producer_some_or_none(codecs
+            .get(get_codec), &format!("No codec for {} when setting up encoding", stream_name))?;
 
-        let codec = codecs
-            .get(get_codec)
-            .ok_or_else(|| anyhow!("No codec for {}", stream_name))?;  
+        let appsrc = webrtcsink_producer_error_or_ok(gstreamer_create_element("appsrc", Some(&self.sink_pad.name()), error_called_from))?;
 
-        let appsrc = make_element("appsrc", Some(&self.sink_pad.name()))?;
-        pipeline.add(&appsrc).unwrap();
+        let pay_filter = webrtcsink_producer_error_or_ok(gstreamer_create_element("capsfilter", None, error_called_from))?;
 
-        let pay_filter = make_element("capsfilter", None)?;
-        pipeline.add(&pay_filter).unwrap();
+        let tee = webrtcsink_producer_error_or_ok(gstreamer_create_element("tee", None, error_called_from))?;
 
-        let tee = make_element("tee", None).unwrap();
-        pipeline.add(&tee).unwrap();
+        let queue = webrtcsink_producer_error_or_ok(gstreamer_create_element("queue", None, error_called_from))?;
 
-        let queue = make_element("queue", None)?;
-        pipeline.add(&queue).unwrap();
-
-        let fakesink = make_element("fakesink", None)?;
+        let fakesink = webrtcsink_producer_error_or_ok(gstreamer_create_element("fakesink", None, error_called_from))?;
         fakesink.set_property("async", false);
-        pipeline.add(&fakesink).unwrap();
 
+        webrtcsink_producer_error_or_ok(gstreamer_add_many(&[&appsrc, &pay_filter, &tee, &queue, &fakesink], &pipeline, error_called_from))?;
+
+        let input_caps = webrtcsink_producer_some_or_none(self.in_caps.as_ref(), "Failed getting input caps when creating producer pipeline")?;
 
         let (enc, _raw_filter, pay) = setup_encoding(
             &pipeline,
             &appsrc,
-            self.in_caps.as_ref().unwrap(),
+            input_caps,
             codec,
             None,
             false,
@@ -869,27 +895,29 @@ impl InputStream {
         pay_filter.set_property("caps", caps.clone());
 
         let appsrc = appsrc.downcast::<gst_app::AppSrc>().unwrap();
+
         gst_utils::StreamProducer::configure_consumer(&appsrc);
 
-        let result = match self.producer.as_ref().unwrap().add_consumer(&appsrc) {
+        let producer = webrtcsink_producer_some_or_none(self.producer.as_ref(), "Failed to get producer in creating producer pipeline")?;
+
+        match producer.add_consumer(&appsrc) {
             Ok(link) => {
                 links.insert(self.sink_pad.name().to_string(), link);
                 Ok(())
-            }
-            Err(err) => Err(anyhow!("Could not link producer: {:?}", err)),
-        };
+            },
+            Err(err) => Err(WebRTCSinkError::ProducerPipelineError {
+                details: format!("Could not link producer: {:?}", err).to_string(),
+            })
+        }?;
 
-        let pad_template = tee.pad_template("src_%u").unwrap();
+        webrtcsink_producer_error_or_ok(gstreamer_request_pad_with_pad_template(&tee, "src_%u", error_called_from))?;
 
-        tee.request_pad(&pad_template, None, None).unwrap();
-
-        gst::Element::link_many(&[&pay, &pay_filter, &tee, &queue, &fakesink])
-        .with_context(|| "Linking encoding elements")?;
+        webrtcsink_producer_error_or_ok(gstreamer_link_many(&[&pay, &pay_filter, &tee, &queue, &fakesink], error_called_from))?;
 
         self.tee = Some(tee);
         self.codec_preferences = Some(caps.clone());
 
-        result
+        Ok(())
     }
 
 }
@@ -926,30 +954,31 @@ impl NavigationEventHandler {
 
 impl WebRTCSink {
 
-    fn prepare_pipeline(&self, element: &super::WebRTCSink, state: &mut State) {
-        let mut streams = state.streams.clone();
-        streams.iter_mut().for_each(|(stream_name, stream )| {         
-                if let Err(err) = stream.create_pipeline(&element, &state.pipeline, &state.codecs, &mut state.links, &stream_name) {
-                    gst::error!(CAT, obj: element, "error creating main pipeline for producer: {}", err);
-                    gst::element_error!(
-                        element,
-                        gst::StreamError::Failed,
-                        ["Failed to start main pipeline for producer: {}", err]
-                    );
-                } else {
-                    gst::info!(CAT, "Main pipeline for producer created")
-                }
-            }
-        );
+    fn create_producer_pipeline(&self, element: &super::WebRTCSink, state: &mut State) -> Result<HashMap<String,InputStream>, WebRTCSinkError> {
 
-        state.streams = streams;
+        let error_called_from = "creating producer pipeline";
+
+        let mut streams = state.streams.clone();
+        streams.iter_mut().try_for_each(|(stream_name, stream )|         
+                stream.create_pipeline(&element, &state.pipeline, &state.codecs, &mut state.links, &stream_name)                    
+        )?;
 
         let clock = element.clock();
         state.pipeline.use_clock(clock.as_ref());
         state.pipeline.set_start_time(gst::ClockTime::NONE);
-        state.pipeline.set_base_time(element.base_time().unwrap());
+        let base_time = webrtcsink_producer_some_or_none(element.base_time(), error_called_from)?;
+        state.pipeline.set_base_time(base_time);
 
-        let mut bus_stream = state.pipeline.bus().unwrap().stream();
+        webrtcsink_producer_error_or_ok(
+            gstreamer_pipeline_set_state(&state.pipeline, gst::State::Playing, error_called_from))?;
+
+        Ok(streams)
+    }
+
+    fn prepare_producer_bus_pipeline(&self, element: &super::WebRTCSink, state: &mut State) -> Result<(), WebRTCSinkError> {
+        let error_called_from = "preparing producer bus pipeline";
+
+        let mut bus_stream = webrtcsink_producer_some_or_none(state.pipeline.bus(), error_called_from)?.stream();
         let element_clone = element.downgrade();
         let pipeline_clone = state.pipeline.downgrade();
 
@@ -999,14 +1028,8 @@ impl WebRTCSink {
                 }
             }
         });
-
-       if state.pipeline.set_state(gst::State::Playing).map_err(|err| {
-            WebRTCSinkError::ProducerPipelineError {
-                details: err.to_string(),
-            }
-        }).is_err() {
-            let _ = self.unprepare(element);
-        }
+       
+        Ok(())
 
     }
 
@@ -1042,18 +1065,19 @@ impl WebRTCSink {
     }
 
     /// Build an ordered map of Codecs, given user-provided audio / video caps */
-    fn lookup_codecs(&self, element: &super::WebRTCSink,) -> BTreeMap<String, Codec> {
+    fn lookup_codecs(&self, element: &super::WebRTCSink,) -> Result<BTreeMap<String, Codec>, WebRTCSinkError> {
 
         let settings = self.settings.lock().unwrap();
 
         if settings.video_caps.is_empty() && settings.audio_caps.is_empty() {
-            gst::error!(CAT, obj: element, "No video caps or audio were given!");
-
             gst::element_error!(
                 element,
                 gst::StreamError::Failed,
                 ["No video caps or audio were given!"]
             );
+            return Err(WebRTCSinkError::ProducerPipelineError { 
+                details: "No video caps or audio were given!".to_string() 
+            });
         }
 
         let mut codecs: BTreeMap<String, Codec>  = BTreeMap::new();
@@ -1066,14 +1090,14 @@ impl WebRTCSink {
             codecs.insert("audio".to_string(), self.get_codec_from_caps(&settings.audio_caps, 97).unwrap());
         }
 
-        codecs
+        Ok(codecs)
   
         
     }
 
     /// Prepare for accepting consumers, by setting
     /// up StreamProducers for each of our sink pads
-    fn prepare(&self, element: &super::WebRTCSink) -> Result<(), Error> {
+    fn prepare(&self, element: &super::WebRTCSink) -> Result<(), WebRTCSinkError> {
         gst::debug!(CAT, obj: element, "preparing");
 
         self.state
@@ -1262,6 +1286,8 @@ impl WebRTCSink {
         element: &super::WebRTCSink,
         peer_id: &str,
     ) -> Result<(), WebRTCSinkError> {
+
+        let error_called_from = "adding consumer";
         let settings = self.settings.lock().unwrap();
         let mut state = self.state.lock().unwrap();
         
@@ -1271,12 +1297,7 @@ impl WebRTCSink {
 
         gst::info!(CAT, obj: element, "Adding consumer {}", peer_id);
 
-        let webrtcbin = make_element("webrtcbin", None).map_err(|err| {
-            WebRTCSinkError::ConsumerPipelineError {
-                peer_id: peer_id.to_string(),
-                details: err.to_string(),
-            }
-        })?;
+        let webrtcbin = webrtcsink_consumer_error_or_ok(gstreamer_create_element("webrtcbin", None, error_called_from), peer_id)?;
 
         webrtcbin.set_property_from_str("bundle-policy", "max-compat");
 
@@ -1288,7 +1309,7 @@ impl WebRTCSink {
             webrtcbin.set_property("turn-server", turn_server);
         }
 
-        state.pipeline.add(&webrtcbin).unwrap();
+        webrtcsink_consumer_error_or_ok(gstreamer_add(&webrtcbin, &state.pipeline, error_called_from), peer_id)?;
 
         let element_clone = element.downgrade();
         let peer_id_clone = peer_id.to_owned();
@@ -1410,7 +1431,7 @@ impl WebRTCSink {
         state
             .streams
             .iter()
-            .for_each(|(_, stream)| consumer.request_webrtcbin_pad(element, stream));
+            .try_for_each(|(_, stream)| consumer.request_webrtcbin_pad(element, stream))?;
 
 
         if settings.enable_data_channel_navigation {
@@ -1617,9 +1638,27 @@ impl WebRTCSink {
                         });
 
                     if all_pads_have_caps {
-                        state.codecs = self.lookup_codecs(&element);
+                        match self.lookup_codecs(&element) {
+                            Ok(codecs) => state.codecs = codecs,
+                            Err(_error) => return false,
+                        };
+
+                        match self.create_producer_pipeline(&element, &mut state) {
+                            Ok(streams) => state.streams = streams,
+                            Err(_error) => {
+                                let _ = self.unprepare(element);
+                                return false;
+                            },
+                        };
+
+                        match self.prepare_producer_bus_pipeline(&element, &mut state) {
+                            Ok(_) => (),
+                            Err(_error) => {
+                                let _ = self.unprepare(element);
+                                return false;
+                            },
+                        };
                         state.pipeline_prepared = true;
-                        self.prepare_pipeline(&element, &mut state);
                         state.maybe_start_signaller(&element);
                     }
 

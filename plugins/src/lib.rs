@@ -2,6 +2,7 @@ use gst::glib;
 
 mod signaller;
 pub mod webrtcsink;
+mod utils;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     webrtcsink::register(plugin)?;

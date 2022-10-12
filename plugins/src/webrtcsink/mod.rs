@@ -24,10 +24,12 @@ pub enum WebRTCSinkError {
     MandatorySdpMlineIndex,
     #[error("duplicate consumer id")]
     DuplicateConsumerId(String),
-    #[error("error setting up consumer pipeline")]
-    ConsumerPipelineError { peer_id: String, details: String },
-    #[error("error setting up producer pipeline")]
+    #[error("error setting up producer pipeline: `{details}`")]
     ProducerPipelineError { details: String },
+    #[error("Failed setting up consumer `{peer_id}` pipeline: `{details}`")]
+    ConsumerPipelineError { peer_id: String, details: String },
+    #[error("Failed preparing webrtcsink element: `{details}`")]
+    PrepareWebrtcsinkError { details: String },
 }
 
 pub trait Signallable: Sync + Send + 'static {
