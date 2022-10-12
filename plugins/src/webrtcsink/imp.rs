@@ -1065,16 +1065,11 @@ impl WebRTCSink {
     }
 
     /// Build an ordered map of Codecs, given user-provided audio / video caps */
-    fn lookup_codecs(&self, element: &super::WebRTCSink,) -> Result<BTreeMap<String, Codec>, WebRTCSinkError> {
+    fn lookup_codecs(&self, _element: &super::WebRTCSink,) -> Result<BTreeMap<String, Codec>, WebRTCSinkError> {
 
         let settings = self.settings.lock().unwrap();
 
         if settings.video_caps.is_empty() && settings.audio_caps.is_empty() {
-            gst::element_error!(
-                element,
-                gst::StreamError::Failed,
-                ["No video caps or audio were given!"]
-            );
             return Err(WebRTCSinkError::ProducerPipelineError { 
                 details: "No video caps or audio were given!".to_string() 
             });
@@ -1640,12 +1635,24 @@ impl WebRTCSink {
                     if all_pads_have_caps {
                         match self.lookup_codecs(&element) {
                             Ok(codecs) => state.codecs = codecs,
-                            Err(_error) => return false,
+                            Err(error) => {
+                                gst::element_error!(
+                                    element,
+                                    gst::StreamError::Failed,
+                                    ["Failed to lookup codec: {:?}", error]
+                                );
+                                return false
+                            },
                         };
 
                         match self.create_producer_pipeline(&element, &mut state) {
                             Ok(streams) => state.streams = streams,
-                            Err(_error) => {
+                            Err(error) => {
+                                gst::element_error!(
+                                    element,
+                                    gst::StreamError::Failed,
+                                    ["Failed to create producer pipeline: {:?}", error]
+                                );
                                 let _ = self.unprepare(element);
                                 return false;
                             },
@@ -1653,7 +1660,12 @@ impl WebRTCSink {
 
                         match self.prepare_producer_bus_pipeline(&element, &mut state) {
                             Ok(_) => (),
-                            Err(_error) => {
+                            Err(error) => {
+                                gst::element_error!(
+                                    element,
+                                    gst::StreamError::Failed,
+                                    ["Failed to prepare producer pipeline bus: {:?}", error]
+                                );
                                 let _ = self.unprepare(element);
                                 return false;
                             },
