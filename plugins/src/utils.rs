@@ -11,10 +11,14 @@ pub enum GstreamerError {
     },
     #[error("Failed adding gstreamer elements when `{0}`")]
     GstreamerCanNotAddElement(String),
+    #[error("Failed removing gstreamer elements when `{0}`")]
+    GstreamerCanNotRemoveElement(String),
     #[error("Failed linking gstreamer elements when `{0}`")]
     GstreamerCanNotLinkElement(String),
     #[error("Failed linking gstreamer pads when `{0}`")]
     GstreamerCanNotLinkPad(String),
+    #[error("Failed unlinking gstreamer pads when `{0}`")]
+    GstreamerCanNotUnlinkPad(String),
     #[error("Failed creating pad template `{pad_template:?}` in gstreamer element {elem_name:?} when `{called_from:?}`")]
     GstreamerCanNotCreatePadTemplate {
         called_from: String,
@@ -114,6 +118,23 @@ pub fn _webrtcsink_prepare_some_or_none<T>(result: Option<T>, error_message: &st
     }
 }
 
+pub fn webrtcsink_unprepare_error_or_ok<T>(result: Result<T, GstreamerError>) -> Result<T,WebRTCSinkError> {
+    result.map_err(|err| {
+        WebRTCSinkError::UnprepareWebrtcsinkError {
+            details: err.to_string(),
+        }
+    })
+}
+
+pub fn webrtcsink_unprepare_some_or_none<T>(result: Option<T>, error_message: &str) -> Result<T,WebRTCSinkError> {
+    match result {
+        Some(t) => Ok(t),
+        None => Err(WebRTCSinkError::UnprepareWebrtcsinkError { 
+            details: error_message.to_string()
+        })
+    }
+}
+
 pub fn gstreamer_create_element(element: &str, name: Option<&str>, called_from: &str) -> Result<gst::Element, GstreamerError> {
     match gst::ElementFactory::make(element, name){
         Ok(elem) => Ok(elem),
@@ -145,6 +166,13 @@ pub fn gstreamer_add(element: &gst::Element, pipeline: &gst::Pipeline, called_fr
     match pipeline.add(element) {
         Ok(_) => Ok(()),
         Err(_error) => Err(GstreamerError::GstreamerCanNotAddElement(called_from.to_string())),
+    }
+}
+
+pub fn gstreamer_remove(element: &gst::Element, pipeline: &gst::Pipeline, called_from: &str) -> Result<(), GstreamerError> {
+    match pipeline.remove(element) {
+        Ok(_) => Ok(()),
+        Err(_error) => Err(GstreamerError::GstreamerCanNotRemoveElement(called_from.to_string())),
     }
 }
 
@@ -180,6 +208,13 @@ pub fn gstreamer_link_pads(src: &gst::Pad, sink: &gst::Pad, called_from: &str) -
     match src.link(sink) {
         Ok(pad) => Ok(pad),
         Err(_error) => Err(GstreamerError::GstreamerCanNotLinkPad(called_from.to_string())),
+    }
+}
+
+pub fn gstreamer_unlink_pads(src: &gst::Pad, sink: &gst::Pad, called_from: &str) -> Result<(), GstreamerError> {
+    match src.unlink(sink) {
+        Ok(_) => Ok(()),
+        Err(_error) => Err(GstreamerError::GstreamerCanNotUnlinkPad(called_from.to_string())),
     }
 }
 
@@ -293,6 +328,17 @@ pub fn gstreamer_pipeline_set_state(pipeline: &gst::Pipeline, state: gst::State,
         Err(_) => Err(GstreamerError::GstreamerCanNotSetState {
             called_from: called_from.to_string(),
             elem_name: "pipeline".to_string(),
+        })
+    }
+}
+
+
+pub fn gstreamer_element_set_state(elem: &gst::Element, state: gst::State, called_from: &str) -> Result<(), GstreamerError> {
+    match elem.set_state(state) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(GstreamerError::GstreamerCanNotSetState {
+            called_from: called_from.to_string(),
+            elem_name: elem.name().to_string(),
         })
     }
 }

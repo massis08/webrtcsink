@@ -30,6 +30,8 @@ pub enum WebRTCSinkError {
     ConsumerPipelineError { peer_id: String, details: String },
     #[error("Failed preparing webrtcsink element: `{details}`")]
     PrepareWebrtcsinkError { details: String },
+    #[error("Failed unpreparing webrtcsink element: `{details}`")]
+    UnprepareWebrtcsinkError { details: String },
 }
 
 pub trait Signallable: Sync + Send + 'static {

@@ -504,77 +504,37 @@ impl State {
         element: &super::WebRTCSink,
         consumer: &mut Consumer,
         signal: bool,
-    ) {
+    ) -> Result<(), WebRTCSinkError> {
         gst::info!(CAT, "Removing: {}", consumer.webrtcbin.name());
+        let error_called_from = format!("finalize consumer {}", consumer.peer_id);
 
-        let mut it = consumer.webrtc_pads.iter().peekable();
+        for (_, webrtc_pad) in &consumer.webrtc_pads {
 
-        while let Some((_, webrtc_pad)) = it.next()  {
+            let queue_src_pad = webrtcsink_unprepare_some_or_none(webrtc_pad.pad.peer(), &error_called_from)?;
+            let queue = webrtcsink_unprepare_some_or_none(queue_src_pad.parent_element(), &error_called_from)?;
+            let queue_sink_pad = webrtcsink_unprepare_error_or_ok(gstreamer_get_static_pad(&queue, "sink", &error_called_from))?;
+
+            let tee_src_pad = webrtcsink_unprepare_some_or_none(queue_sink_pad.peer(), &error_called_from)?;
+            let tee = webrtcsink_unprepare_some_or_none(tee_src_pad.parent_element(), &error_called_from)?;
             
-            if let Some(queue_src_pad) = webrtc_pad.pad.peer(){
-                
-                let queue = queue_src_pad.parent_element().unwrap();
-                let queue_sink_pad = queue.static_pad("sink").unwrap();
+            let tee_block = webrtcsink_unprepare_some_or_none(tee_src_pad
+                .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
+                    gst::PadProbeReturn::Ok
+                }), &error_called_from)?;              
 
-                if let Some(tee_src_pad) = queue_sink_pad.peer(){                
-                    let tee = tee_src_pad.parent_element().unwrap();
-                    let tee_block = tee_src_pad
-                        .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
-                            gst::PadProbeReturn::Ok
-                        })
-                        .unwrap();
-                    
-                    if queue_src_pad.unlink(&webrtc_pad.pad).is_err() {
-                        gst::info!(
-                            CAT,
-                            "ERROR, Failed to unlink queue src to webrtc pad"
-                        );
-                    }
-                    if tee_src_pad.unlink(&queue_sink_pad).is_err() {
-                        gst::info!(
-                            CAT,
-                            "ERROR, Failed to unlink tee src to queue sink"
-                        );                    
-                    }
-                    tee_src_pad.remove_probe(tee_block);
-                    tee.release_request_pad(&tee_src_pad);
-                    consumer.webrtcbin.release_request_pad(&webrtc_pad.pad);
+            webrtcsink_unprepare_error_or_ok(gstreamer_unlink_pads(&queue_src_pad, &webrtc_pad.pad, &error_called_from))?;    
+            webrtcsink_unprepare_error_or_ok(gstreamer_unlink_pads(&tee_src_pad, &queue_sink_pad, &error_called_from))?;    
 
-                    if queue.set_state(gst::State::Null).is_err() {
-                        gst::info!(
-                            CAT,
-                            "ERROR, Failed to set queue to Null"
-                        );
-                    }
+            tee_src_pad.remove_probe(tee_block);
 
-                    if  self.pipeline.remove(&queue).is_err() {
-                        gst::info!(
-                            CAT,
-                            "ERROR, Failed to remove queue"
-                        );
-                    }
+            tee.release_request_pad(&tee_src_pad);
+            consumer.webrtcbin.release_request_pad(&webrtc_pad.pad);
 
-                }
-                else {
-                    gst::debug!(
-                        CAT,
-                        obj: element,
-                        "Queue pad {} is not linked to tee pad",
-                        webrtc_pad.pad.name()
-                    )
-                }
+            webrtcsink_unprepare_error_or_ok(gstreamer_element_set_state(&queue, gst::State::Null, &error_called_from))?;
 
-            }
-            else {
-                gst::debug!(
-                    CAT,
-                    obj: element,
-                    "Webrtc pad {} is not linked to queue pad",
-                    webrtc_pad.pad.name()
-                );
-            }
-
-        }
+            webrtcsink_unprepare_error_or_ok(gstreamer_remove(&queue, &self.pipeline, &error_called_from))?;
+            
+        }                   
 
         let pipeline_clone = self.pipeline.downgrade();
         consumer.webrtcbin.call_async( move |webrtcbin| {
@@ -599,6 +559,7 @@ impl State {
             self.signaller.consumer_removed(element, &consumer.peer_id);
             
         }
+        Ok(())
     }
 
     fn remove_consumer(
@@ -606,12 +567,12 @@ impl State {
         element: &super::WebRTCSink,
         peer_id: &str,
         signal: bool,
-    ) -> Option<Consumer> {
+    ) -> Result<Option<Consumer>, WebRTCSinkError> {
         if let Some(mut consumer) = self.consumers.remove(peer_id) {
-            self.finalize_consumer(element, &mut consumer, signal);
-            Some(consumer)
+            self.finalize_consumer(element, &mut consumer, signal)?;
+            Ok(Some(consumer))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -804,19 +765,38 @@ impl InputStream {
     }
 
     /// Called when transitioning state back down to Ready
-    fn unprepare(&mut self, element: &super::WebRTCSink) {
-        self.sink_pad.set_target(None::<&gst::Pad>).unwrap();
+    fn unprepare(&mut self, element: &super::WebRTCSink) -> Result<(), WebRTCSinkError> {
+        
+        let error_called_from = "unprepare input stream";
+        match self.sink_pad.set_target(None::<&gst::Pad>){
+            Ok(_) => Ok(()),
+            Err(error) => Err(WebRTCSinkError::UnprepareWebrtcsinkError {
+                details: format!("Failed setting target to None in sink pad {}: {:?}", self.sink_pad.name(), error),
+            })
+        }?;
 
         if let Some(clocksync) = self.clocksync.take() {
-            element.remove(&clocksync).unwrap();
-            clocksync.set_state(gst::State::Null).unwrap();
+            match element.remove(&clocksync) {
+                Ok(_) => Ok(()),
+                Err(error) => Err(WebRTCSinkError::UnprepareWebrtcsinkError {
+                    details: format!("Failed removing appsink from webrtcsink: {:?}", error),
+                })
+            }?;
+            webrtcsink_unprepare_error_or_ok(gstreamer_element_set_state(&clocksync, gst::State::Null, error_called_from))?;
         }
 
         if let Some(producer) = self.producer.take() {
             let appsink = producer.appsink().upcast_ref::<gst::Element>();
-            element.remove(appsink).unwrap();
-            appsink.set_state(gst::State::Null).unwrap();
+            match element.remove(appsink) {
+                Ok(_) => Ok(()),
+                Err(error) => Err(WebRTCSinkError::UnprepareWebrtcsinkError {
+                    details: format!("Failed removing appsink from webrtcsink: {:?}", error),
+                })
+            }?;
+            webrtcsink_unprepare_error_or_ok(gstreamer_element_set_state(&appsink, gst::State::Null, error_called_from))?;
         }
+
+        Ok(())
     }
 
     fn create_caps_for_pay_filter(&self, codec_name: &str) -> gst::Caps{
@@ -1115,13 +1095,13 @@ impl WebRTCSink {
         let consumer_ids: Vec<_> = state.consumers.keys().map(|k| k.to_owned()).collect();
 
         for id in consumer_ids {
-            state.remove_consumer(element, &id, true);
+            state.remove_consumer(element, &id, true)?;
         }
 
         state
             .streams
             .iter_mut()
-            .for_each(|(_, stream)| stream.unprepare(element));
+            .try_for_each(|(_, stream)| stream.unprepare(element))?;
 
         state.links.clear();
 
@@ -1176,7 +1156,7 @@ impl WebRTCSink {
                     err
                 );
 
-                state.remove_consumer(element, peer_id, true);
+                let _ = state.remove_consumer(element, peer_id, true);
             }
         }
     }
@@ -1271,7 +1251,7 @@ impl WebRTCSink {
                 err
             );
 
-            state.remove_consumer(element, &peer_id, true);
+            let _ = state.remove_consumer(element, &peer_id, true);
         }
     }
 
@@ -1471,7 +1451,7 @@ impl WebRTCSink {
             return Err(WebRTCSinkError::NoConsumerWithId(peer_id.to_string()));
         }
 
-        if let Some(consumer) = state.remove_consumer(element, peer_id, signal) {
+        if let Some(consumer) = state.remove_consumer(element, peer_id, signal)? {
             drop(state);
             element.emit_by_name::<()>("consumer-removed", &[&peer_id, &consumer.webrtcbin]);
         }
@@ -1519,7 +1499,7 @@ impl WebRTCSink {
             );
 
             if remove {
-                state.finalize_consumer(element, &mut consumer, true);
+                let _ = state.finalize_consumer(element, &mut consumer, true);
             } else {
                 state.consumers.insert(consumer.peer_id.clone(), consumer);
             }
@@ -1581,7 +1561,7 @@ impl WebRTCSink {
                             media_idx,
                             media_str
                         );
-                        state.remove_consumer(element, peer_id, true);
+                        state.remove_consumer(element, peer_id, true)?;
 
                         return Err(WebRTCSinkError::ConsumerRefusedMedia {
                             peer_id: peer_id.to_string(),
