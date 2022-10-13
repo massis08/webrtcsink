@@ -1530,7 +1530,7 @@ impl WebRTCSink {
     /// Called by the signaller with an answer to our offer
     pub fn handle_sdp(
         &self,
-        element: &super::WebRTCSink,
+        _element: &super::WebRTCSink,
         peer_id: &str,
         desc: &gst_webrtc::WebRTCSessionDescription,
     ) -> Result<(), WebRTCSinkError> {
@@ -1558,7 +1558,6 @@ impl WebRTCSink {
                             media_idx,
                             media_str
                         );
-                        state.remove_consumer(element, peer_id, true)?;
 
                         return Err(WebRTCSinkError::ConsumerRefusedMedia {
                             peer_id: peer_id.to_string(),

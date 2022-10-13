@@ -154,7 +154,9 @@ impl Signaller {
                                         if let Ok(webrtcbin) = element.create_webrtcbin_for_consumer(&peer_id) {
                                             if let Err(err) = element.add_consumer(&peer_id, webrtcbin) {
                                                 gst::error!(CAT, obj: &element, "{}", err);
-                                                let _ = element.remove_consumer(&peer_id);
+                                                if let Err(err) = element.remove_consumer(&peer_id) {
+                                                    gst::warning!(CAT, obj: &element, "{}", err);
+                                                }
                                             }
                                         } else {
                                             gst::error!(CAT, obj: &element, "{}", "Failed creating webrtc");
@@ -184,7 +186,10 @@ impl Signaller {
                                                     .unwrap(),
                                                 ),
                                             ) {
-                                                gst::warning!(CAT, obj: &element, "{}", err);
+                                                gst::error!(CAT, obj: &element, "{}", err);
+                                                if let Err(err) = element.remove_consumer(&peer_id) {
+                                                    gst::warning!(CAT, obj: &element, "{}", err);
+                                                }
                                             }
                                         }
                                         p::PeerMessageInner::Sdp(p::SdpMessage::Offer {
@@ -207,6 +212,9 @@ impl Signaller {
                                                 &candidate,
                                             ) {
                                                 gst::warning!(CAT, obj: &element, "{}", err);
+                                                if let Err(err) = element.remove_consumer(&peer_id) {
+                                                    gst::warning!(CAT, obj: &element, "{}", err);
+                                                }
                                             }
                                         }
                                     },
