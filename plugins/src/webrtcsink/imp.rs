@@ -1161,74 +1161,69 @@ impl WebRTCSink {
         }
     }
 
-    fn negotiate(&self, element: &super::WebRTCSink, peer_id: &str) {
+    fn negotiate(&self, element: &super::WebRTCSink, peer_id: &str) -> Result<(), WebRTCSinkError>{
         let state = self.state.lock().unwrap();
 
         gst::debug!(CAT, obj: element, "Negotiating for peer {}", peer_id);
 
-        if let Some(consumer) = state.consumers.get(peer_id) {
-            let element = element.downgrade();
-            gst::debug!(CAT, "Creating offer for peer {}", peer_id);
-            let peer_id = peer_id.to_string();
-            let promise = gst::Promise::with_change_func(move |reply| {
-                gst::debug!(CAT, "Created offer for peer {}", peer_id);
+        let consumer = webrtcsink_consumer_some_or_none(state.consumers.get(peer_id), peer_id, &format!("failed getting consumer {}", peer_id))?;
 
-                if let Some(element) = element.upgrade() {
-                    let this = Self::from_instance(&element);
-                    let reply = match reply {
-                        Ok(Some(reply)) => reply,
-                        Ok(None) => {
-                            gst::warning!(
-                                CAT,
-                                obj: &element,
-                                "Promise returned without a reply for {}",
-                                peer_id
-                            );
+        let element = element.downgrade();
+        gst::debug!(CAT, "Creating offer for peer {}", peer_id);
+        let peer_id = peer_id.to_string();
+        let promise = gst::Promise::with_change_func(move |reply| {
+            gst::debug!(CAT, "Created offer for peer {}", peer_id);
 
-                            let _ = this.remove_consumer(&element, &peer_id, true);
-                            return;
-                        }
-                        Err(err) => {
-                            gst::warning!(
-                                CAT,
-                                obj: &element,
-                                "Promise returned with an error for {}: {:?}",
-                                peer_id,
-                                err
-                            );
-                            let _ = this.remove_consumer(&element, &peer_id, true);
-                            return;
-                        }
-                    };
-
-                    if let Ok(offer) = reply
-                        .value("offer")
-                        .map(|offer| offer.get::<gst_webrtc::WebRTCSessionDescription>().unwrap())
-                    {
-                        this.on_offer_created(&element, offer, &peer_id);
-                    } else {
+            if let Some(element) = element.upgrade() {
+                let this = Self::from_instance(&element);
+                let reply = match reply {
+                    Ok(Some(reply)) => reply,
+                    Ok(None) => {
                         gst::warning!(
                             CAT,
-                            "Reply without an offer for consumer {}: {:?}",
+                            obj: &element,
+                            "Promise returned without a reply for {}",
+                            peer_id
+                        );
+
+                        let _ = this.remove_consumer(&element, &peer_id, true);
+                        return;
+                    }
+                    Err(err) => {
+                        gst::warning!(
+                            CAT,
+                            obj: &element,
+                            "Promise returned with an error for {}: {:?}",
                             peer_id,
-                            reply
+                            err
                         );
                         let _ = this.remove_consumer(&element, &peer_id, true);
+                        return;
                     }
-                }
-            });
+                };
 
-            consumer
-                .webrtcbin
-                .emit_by_name::<()>("create-offer", &[&None::<gst::Structure>, &promise]);
-        } else {
-            gst::debug!(
-                CAT,
-                obj: element,
-                "consumer for peer {} no longer exists",
-                peer_id
-            );
-        }
+                if let Ok(offer) = reply
+                    .value("offer")
+                    .map(|offer| offer.get::<gst_webrtc::WebRTCSessionDescription>().unwrap())
+                {
+                    this.on_offer_created(&element, offer, &peer_id);
+                } else {
+                    gst::warning!(
+                        CAT,
+                        "Reply without an offer for consumer {}: {:?}",
+                        peer_id,
+                        reply
+                    );
+                    let _ = this.remove_consumer(&element, &peer_id, true);
+                }
+            }
+        });
+
+        consumer
+            .webrtcbin
+            .emit_by_name::<()>("create-offer", &[&None::<gst::Structure>, &promise]);
+
+        Ok(())
     }
 
     fn on_ice_candidate(
@@ -1448,7 +1443,7 @@ impl WebRTCSink {
         //
         // This is completely safe, as we know that by now all conditions are gathered:
         // webrtcbin is in the Ready state, and all its transceivers have codec_preferences.
-        self.negotiate(element, peer_id);
+        self.negotiate(element, peer_id)?;
 
         Ok(())
     }
