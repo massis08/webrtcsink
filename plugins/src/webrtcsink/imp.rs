@@ -1236,7 +1236,7 @@ impl WebRTCSink {
         element: &super::WebRTCSink,
         peer_id: String,
         sdp_m_line_index: u32,
-        candidate: String,
+        candidate: String
     ) {
         let mut state = self.state.lock().unwrap();
         if let Err(err) =
@@ -1255,16 +1255,17 @@ impl WebRTCSink {
         }
     }
 
-    /// Called by the signaller to add a new consumer
-    pub fn add_consumer(
+    pub fn create_webrtcbin_for_consumer( 
         &self,
         element: &super::WebRTCSink,
         peer_id: &str,
-    ) -> Result<(), WebRTCSinkError> {
+    )-> Result<gst::Element, WebRTCSinkError> {
 
         let error_called_from = "adding consumer";
+
         let settings = self.settings.lock().unwrap();
-        let mut state = self.state.lock().unwrap();
+
+        let state = self.state.lock().unwrap();
         
         if state.consumers.contains_key(peer_id) {
             return Err(WebRTCSinkError::DuplicateConsumerId(peer_id.to_string()));
@@ -1397,7 +1398,21 @@ impl WebRTCSink {
                 );
             }
         });
+        Ok(webrtcbin)
+    }
 
+    /// Called by the signaller to add a new consumer
+    pub fn add_consumer(
+        &self,
+        element: &super::WebRTCSink,
+        peer_id: &str,
+        webrtcbin: gst::Element,
+    ) -> Result<(), WebRTCSinkError> {
+
+        //let error_called_from = "adding consumer";
+        let settings = self.settings.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        
         let mut consumer = Consumer::new(
             webrtcbin.clone(),
             peer_id.to_string()
@@ -1417,7 +1432,7 @@ impl WebRTCSink {
 
         drop(state);
 
-        self.on_remote_description_set(&element, peer_id.to_string());
+        self.on_remote_description_set(&element, peer_id.to_string())?;
 
         // This is intentionally emitted with the pipeline in the Ready state,
         // so that application code can create data channels at the correct
@@ -1459,51 +1474,38 @@ impl WebRTCSink {
         Ok(())
     }
 
-    fn on_remote_description_set(&self, element: &super::WebRTCSink, peer_id: String) {
+    fn on_remote_description_set(&self, element: &super::WebRTCSink, peer_id: String) -> Result<(), WebRTCSinkError>{
+
         let mut state = self.state.lock().unwrap();
-        let mut remove = false;
+        let error_called_from = "setting remote description";
 
-        if let Some(mut consumer) = state.consumers.remove(&peer_id) {
-            for webrtc_pad in consumer.webrtc_pads.clone().values() {
-                if let Some(stream) = state
-                    .streams
-                    .get(&webrtc_pad.stream_name) {
-                        if let Err(err) =
-                        consumer.connect_input_stream(element, webrtc_pad, stream, &state.pipeline) {
-                            gst::error!(
-                                CAT,
-                                obj: element,
-                                "Failed to connect input stream {} for consumer {}: {}",
-                                webrtc_pad.stream_name,
-                                peer_id,
-                                err
-                            );
-                            remove = true;
-                            break;
-                        }
-                } else {
-                    gst::error!(
-                        CAT,
-                        obj: element,
-                        "No producer to connect consumer {} to",
-                        peer_id,
-                    );
-                    remove = true;
-                    break;
-                }
-            }
+        let mut consumer =  webrtcsink_consumer_some_or_none(state.consumers.remove(&peer_id), &peer_id, &error_called_from)?;
+       
+        for webrtc_pad in consumer.webrtc_pads.clone().values() {
+            
+            if let Some(stream) = state
+                .streams
+                .get(&webrtc_pad.stream_name) {
+                    
+                    if let Err(err) = consumer.connect_input_stream(element, webrtc_pad, stream, &state.pipeline) {
+                        state.consumers.insert(peer_id.clone(), consumer);
+                        return Err(WebRTCSinkError::ConsumerPipelineError { peer_id: peer_id, details: err.to_string() })
+                    }
 
-            state.pipeline.debug_to_dot_file_with_ts(
-                gst::DebugGraphDetails::all(),
-                format!("webrtcsink-consumer-peerId-{}-remote-description-set", peer_id,),
-            );
-
-            if remove {
-                let _ = state.finalize_consumer(element, &mut consumer, true);
             } else {
-                state.consumers.insert(consumer.peer_id.clone(), consumer);
+                state.consumers.insert(peer_id.clone(), consumer);
+                return Err(WebRTCSinkError::ConsumerPipelineError { peer_id: peer_id, details: "No producer to connect consumer to".to_string() })
             }
         }
+
+        state.pipeline.debug_to_dot_file_with_ts(
+            gst::DebugGraphDetails::all(),
+            format!("webrtcsink-consumer-peerId-{}-remote-description-set", peer_id,),
+        );
+
+        state.consumers.insert(peer_id.clone(), consumer);
+
+        Ok(())
     }
 
     /// Called by the signaller with an ice candidate

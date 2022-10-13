@@ -120,11 +120,18 @@ impl WebRTCSink {
         ws.handle_signalling_error(self, anyhow::anyhow!(error));
     }
 
-    pub fn add_consumer(&self, peer_id: &str) -> Result<(), WebRTCSinkError> {
+    pub fn add_consumer(&self, peer_id: &str, webrtcbin: gst::Element) -> Result<(), WebRTCSinkError> {
         let ws = imp::WebRTCSink::from_instance(self);
 
-        ws.add_consumer(self, peer_id)
+        ws.add_consumer(self, peer_id, webrtcbin)
     }
+
+    pub fn create_webrtcbin_for_consumer(&self, peer_id: &str) -> Result<gst::Element, WebRTCSinkError> {
+        let ws = imp::WebRTCSink::from_instance(self);
+
+        ws.create_webrtcbin_for_consumer(self, peer_id)
+    }
+
 
     pub fn remove_consumer(&self, peer_id: &str) -> Result<(), WebRTCSinkError> {
         let ws = imp::WebRTCSink::from_instance(self);

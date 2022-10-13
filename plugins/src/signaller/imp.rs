@@ -151,9 +151,18 @@ impl Signaller {
                                     }
                                     p::OutgoingMessage::Registered(_) => unreachable!(),
                                     p::OutgoingMessage::StartSession { peer_id } => {
-                                        if let Err(err) = element.add_consumer(&peer_id) {
+                                        if let Ok(webrtcbin) = element.create_webrtcbin_for_consumer(&peer_id) {
+                                            if let Err(err) = element.add_consumer(&peer_id, webrtcbin) {
+                                                //Call function to remove consumer
+                                                //Launch an gst::error
+                                                gst::warning!(CAT, obj: &element, "{}", err);
+                                            }
+                                        } else  if let Err(err) = element.create_webrtcbin_for_consumer(&peer_id) {
+                                            //Launch an gst::error
+                                            //Remove just webrtcbin from pipeline
                                             gst::warning!(CAT, obj: &element, "{}", err);
                                         }
+                                        
                                     }
                                     p::OutgoingMessage::EndSession { peer_id } => {
                                         if let Err(err) = element.remove_consumer(&peer_id) {
