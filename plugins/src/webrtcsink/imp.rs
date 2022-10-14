@@ -454,7 +454,7 @@ fn setup_encoding(
      * provide feedback for audio packets.
      */
     if twcc {
-        let twcc_extension = gst_rtp::RTPHeaderExtension::create_from_uri(RTP_TWCC_URI).unwrap();
+        let twcc_extension = webrtcsink_producer_some_or_none(gst_rtp::RTPHeaderExtension::create_from_uri(RTP_TWCC_URI), "failed to get twcc extension")?;
         twcc_extension.set_id(1);
         pay.emit_by_name::<()>("add-extension", &[&twcc_extension]);
     }
@@ -537,21 +537,28 @@ impl State {
 
         let pipeline_clone = self.pipeline.downgrade();
         consumer.webrtcbin.call_async( move |webrtcbin| {
-            let pipeline = pipeline_clone.upgrade().unwrap();
+            if let Some(pipeline) = pipeline_clone.upgrade(){
+                if webrtcbin.set_state(gst::State::Null).is_err() {
+                    gst::error!(
+                        CAT,
+                        "Failed to set state of webrtcbin to Null"
+                    );
+                }
+    
+                if  pipeline.remove(webrtcbin).is_err() {
+                    gst::error!(
+                        CAT,
+                        "Failed to remove webrtcbin from pipeline"
+                    );
+                }
+            } else {
+                gst::error!(
+                    CAT,
+                    "Failed to upgrade pipeline"
+                );
+            }
             
-            if webrtcbin.set_state(gst::State::Null).is_err() {
-                gst::error!(
-                    CAT,
-                    "Failed to set state of webrtcbin to Null"
-                );
-            }
 
-            if  pipeline.remove(webrtcbin).is_err() {
-                gst::error!(
-                    CAT,
-                    "Failed to remove webrtcbin from pipeline"
-                );
-            }
         });
 
         if signal {
@@ -751,7 +758,11 @@ impl InputStream {
 
         webrtcsink_prepare_error_or_ok(gstreamer_ghost_pad_set_target(&clocksync, &self.sink_pad, "sink"))?;
         
-        let appsink = appsink.downcast::<gst_app::AppSink>().unwrap();
+        let appsink = match appsink.downcast::<gst_app::AppSink>(){
+            Ok(appsink) => Ok(appsink),
+            Err(_element) => Err(WebRTCSinkError::PrepareWebrtcsinkError { details: "failed to downcast appsink".to_string() }),
+        }?;
+
         let producer = StreamProducer::from(&appsink);
         producer.forward();
         self.producer = Some(producer);
@@ -793,8 +804,8 @@ impl InputStream {
         Ok(())
     }
 
-    fn create_caps_for_pay_filter(&self, codec_name: &str) -> gst::Caps{
-        let payload = self.payload.unwrap();
+    fn create_caps_for_pay_filter(&self, codec_name: &str) -> Result<gst::Caps, WebRTCSinkError>{
+        let payload = webrtcsink_producer_some_or_none(self.payload, "failed to get payload")?;
         
         let mut struct_caps_pay = gst::Structure::builder("application/x-rtp")
             .field("payload", payload); 
@@ -819,7 +830,7 @@ impl InputStream {
                 .field("ssrc", self.ssrc as u32);
         }
 
-        gst::Caps::builder_full().structure(struct_caps_pay.build()).build()
+        Ok(gst::Caps::builder_full().structure(struct_caps_pay.build()).build())
 
     }
 
@@ -863,10 +874,15 @@ impl InputStream {
             &[&self.sink_pad.name(), &enc],
         );
 
-        let caps = self.create_caps_for_pay_filter(codec.caps.structure(0).unwrap().name());
+        let codec_name = webrtcsink_producer_some_or_none(codec.caps.structure(0), "failed to get codec name from caps")?.name();
+
+        let caps = self.create_caps_for_pay_filter(codec_name)?;
         pay_filter.set_property("caps", caps.clone());
 
-        let appsrc = appsrc.downcast::<gst_app::AppSrc>().unwrap();
+        let appsrc = match appsrc.downcast::<gst_app::AppSrc>(){
+            Ok(appsink) => Ok(appsink),
+            Err(_element) => Err(WebRTCSinkError::ProducerPipelineError { details: "failed to downcast appsrc".to_string() }),
+        }?;
 
         gst_utils::StreamProducer::configure_consumer(&appsrc);
 
@@ -1053,11 +1069,13 @@ impl WebRTCSink {
         let mut codecs: BTreeMap<String, Codec>  = BTreeMap::new();
 
         if !settings.video_caps.is_empty() {
-            codecs.insert("video".to_string(), self.get_codec_from_caps(&settings.video_caps, 96).unwrap());
+            let video_codecs = webrtcsink_producer_some_or_none(self.get_codec_from_caps(&settings.video_caps, 96), "failed to get video codecs")?;
+            codecs.insert("video".to_string(), video_codecs);
         }
 
         if !settings.audio_caps.is_empty() {
-            codecs.insert("audio".to_string(), self.get_codec_from_caps(&settings.audio_caps, 97).unwrap());
+            let audio_codecs = webrtcsink_producer_some_or_none(self.get_codec_from_caps(&settings.audio_caps, 97), "failed to get audio codecs")?;
+            codecs.insert("audio".to_string(), audio_codecs);
         }
 
         Ok(codecs)
@@ -1204,12 +1222,23 @@ impl WebRTCSink {
                         return;
                     }
                 };
-
-                if let Ok(offer) = reply
-                    .value("offer")
-                    .map(|offer| offer.get::<gst_webrtc::WebRTCSessionDescription>().unwrap())
+                if let Ok(offer) = reply.value("offer")
                 {
-                    this.on_offer_created(&element, offer, &peer_id);
+                    if let Ok(offer) = offer.get::<gst_webrtc::WebRTCSessionDescription>(){
+                        this.on_offer_created(&element, offer, &peer_id);
+                    } else {
+                        gst::warning!(
+                            CAT,
+                            "Offer of {} without session description : {:?}",
+                            peer_id,
+                            reply
+                        );
+                        let error = WebRTCSinkError::FailedNegotiate { 
+                            details: "offer without session description".to_string(), 
+                            peer_id: peer_id.to_string() 
+                        };
+                        let _ = this.remove_consumer(&element, &peer_id, true, Some(error));
+                    }
                 } else {
                     gst::warning!(
                         CAT,
@@ -2065,9 +2094,27 @@ impl ElementImpl for WebRTCSink {
             })
             .build();
 
-        sink_pad.set_active(true).unwrap();
+        match sink_pad.set_active(true){
+            Ok(_) => (),
+            Err(_) => {
+                gst::element_error!(
+                    element,
+                    gst::StreamError::Failed,
+                    ["Failed to activate sink pad of webrtcsink"]
+                );
+            },
+        }
         sink_pad.use_fixed_caps();
-        element.add_pad(&sink_pad).unwrap();
+        match element.add_pad(&sink_pad) {
+            Ok(_) => (),
+            Err(_) => {
+                gst::element_error!(
+                    element,
+                    gst::StreamError::Failed,
+                    ["Failed to add sink pad to webrtcsink"]
+                );
+            },
+        }
 
         let srrc = state.generate_ssrc();
 
