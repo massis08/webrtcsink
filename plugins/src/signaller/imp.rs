@@ -1,4 +1,4 @@
-use crate::webrtcsink::WebRTCSink;
+use crate::webrtcsink::{WebRTCSink, WebRTCSinkError};
 use anyhow::{anyhow, Error};
 use async_std::task;
 use async_tungstenite::tungstenite::Message as WsMessage;
@@ -151,23 +151,30 @@ impl Signaller {
                                     }
                                     p::OutgoingMessage::Registered(_) => unreachable!(),
                                     p::OutgoingMessage::StartSession { peer_id } => {
-                                        if let Ok(webrtcbin) = element.create_webrtcbin_for_consumer(&peer_id) {
-                                            if let Err(err) = element.add_consumer(&peer_id, webrtcbin) {
-                                                gst::error!(CAT, obj: &element, "{}", err);
-                                                if let Err(err) = element.remove_consumer(&peer_id) {
-                                                    gst::warning!(CAT, obj: &element, "{}", err);
+                                        match element.create_webrtcbin_for_consumer(&peer_id) {
+                                            Ok(webrtcbin) => {
+                                                if let Err(err) = element.add_consumer(&peer_id, webrtcbin) {
+
+                                                    gst::error!(CAT, obj: &element, "Failed to add consumer {} :{}", &peer_id, err);
+    
+                                                    if let Err(err) = element.remove_consumer(&peer_id, true, Some(err)) {
+                                                        gst::warning!(CAT, obj: &element, "Failed to remove consumer {} :{}", &peer_id, err);
+                                                    }
                                                 }
                                             }
-                                        } else {
-                                            gst::error!(CAT, obj: &element, "{}", "Failed creating webrtc");
-                                            //Launch an gst::error
-                                            //Remove just webrtcbin from pipeline
-                                            //gst::warning!(CAT, obj: &element, "{}", err);
-                                        }
+                                            Err(err) => {
+                                                gst::error!(CAT, obj: &element, "{}", "Failed to create webrtcbin");
+
+                                                if let Err(err) = element.remove_webrtcbin(&peer_id, Some(err)) {
+    
+                                                    gst::warning!(CAT, obj: &element, "Failed to remove webrtcbin: {}", err);
+                                                }
+                                            }
+                                        }    
                                         
                                     }
                                     p::OutgoingMessage::EndSession { peer_id } => {
-                                        if let Err(err) = element.remove_consumer(&peer_id) {
+                                        if let Err(err) = element.remove_consumer(&peer_id, false, None) {
                                             gst::warning!(CAT, obj: &element, "{}", err);
                                         }
                                     }
@@ -186,9 +193,9 @@ impl Signaller {
                                                     .unwrap(),
                                                 ),
                                             ) {
-                                                gst::error!(CAT, obj: &element, "{}", err);
-                                                if let Err(err) = element.remove_consumer(&peer_id) {
-                                                    gst::warning!(CAT, obj: &element, "{}", err);
+                                                gst::error!(CAT, obj: &element, "Failed to handle sdp: {}", err);
+                                                if let Err(err) = element.remove_consumer(&peer_id, true,Some(err)) {
+                                                    gst::warning!(CAT, obj: &element, "Failed to remove consumer {}: {}", &peer_id, err);
                                                 }
                                             }
                                         }
@@ -211,9 +218,9 @@ impl Signaller {
                                                 None,
                                                 &candidate,
                                             ) {
-                                                gst::warning!(CAT, obj: &element, "{}", err);
-                                                if let Err(err) = element.remove_consumer(&peer_id) {
-                                                    gst::warning!(CAT, obj: &element, "{}", err);
+                                                gst::warning!(CAT, obj: &element, "Failed to handle ice: {}", err);
+                                                if let Err(err) = element.remove_consumer(&peer_id, true,Some(err)) {
+                                                    gst::warning!(CAT, obj: &element, "Failed to remove consumer {}: {}", &peer_id, err);
                                                 }
                                             }
                                         }
@@ -365,9 +372,30 @@ impl Signaller {
         }
     }
 
-    pub fn consumer_removed(&self, element: &WebRTCSink, peer_id: &str) {
-        gst::debug!(CAT, obj: element, "Signalling consumer {} removed", peer_id);
+    fn send_end_session_with_error(&self, element: &WebRTCSink, peer_id: &str, error: WebRTCSinkError){
+        gst::info!(CAT, "Going to send error");
+        let state = self.state.lock().unwrap();
+        let peer_id = peer_id.to_string();
+        let element = element.downgrade();
+        if let Some(mut sender) = state.websocket_sender.clone() {
+            task::spawn(async move {
+                if let Err(err) = sender
+                    .send(p::IncomingMessage::EndSessionError(p::EndSessionErrorMessage {
+                        peer_id: peer_id.to_string(),
+                        error: error.to_string(),
+                    }))
+                    .await
+                {
+                    if let Some(element) = element.upgrade() {
+                        element.handle_signalling_error(anyhow!("Error: {}", err).into());
+                    }
+                }
+            });
+        }
+    }
 
+    fn send_end_session(&self, element: &WebRTCSink, peer_id: &str){
+        gst::info!(CAT, "Not going to send error");
         let state = self.state.lock().unwrap();
         let peer_id = peer_id.to_string();
         let element = element.downgrade();
@@ -385,6 +413,15 @@ impl Signaller {
                 }
             });
         }
+    }
+
+    pub fn consumer_removed(&self, element: &WebRTCSink, peer_id: &str, error: Option<WebRTCSinkError>) {
+        gst::debug!(CAT, obj: element, "Signalling consumer {} removed", peer_id);
+
+        match error {
+            Some(err) => self.send_end_session_with_error(element, peer_id, err),
+            None => self.send_end_session(element, peer_id)
+        };
     }
 }
 

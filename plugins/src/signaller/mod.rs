@@ -1,4 +1,4 @@
-use crate::webrtcsink::{Signallable, WebRTCSink};
+use crate::webrtcsink::{Signallable, WebRTCSink, WebRTCSinkError};
 use gst::glib;
 use gst::subclass::prelude::ObjectSubclassExt;
 use std::error::Error;
@@ -49,9 +49,9 @@ impl Signallable for Signaller {
         signaller.stop(element);
     }
 
-    fn consumer_removed(&mut self, element: &WebRTCSink, peer_id: &str) {
+    fn consumer_removed(&mut self, element: &WebRTCSink, peer_id: &str, error: Option<WebRTCSinkError>) {
         let signaller = imp::Signaller::from_instance(self);
-        signaller.consumer_removed(element, peer_id);
+        signaller.consumer_removed(element, peer_id, error);
     }
 }
 

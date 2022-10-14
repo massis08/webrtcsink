@@ -81,6 +81,10 @@ impl Handler {
             p::IncomingMessage::EndSession(p::EndSessionMessage {
                 peer_id: other_peer_id,
             }) => self.end_session(peer_id, &other_peer_id),
+            p::IncomingMessage::EndSessionError(p::EndSessionErrorMessage {
+                peer_id:other_peer_id, error
+            }) => self.end_session_error(peer_id, &other_peer_id, &error),
+
         }
     }
 
@@ -193,6 +197,67 @@ impl Handler {
             ))
         }
     }
+
+    #[instrument(level = "debug", skip(self))]
+    /// End a session between two peers
+    fn end_session_error(&mut self, peer_id: &str, other_peer_id: &str, error: &str) -> Result<(), Error> {
+        info!(peer_id=%peer_id, other_peer_id=%other_peer_id, error=%error, "endsessionerror request");
+        if let Some(ref mut consumers) = self.producers.get_mut(peer_id) {
+            if consumers.remove(other_peer_id) {
+                info!(producer_id=%peer_id, consumer_id=%other_peer_id, "ended session with error");
+
+                self.items.push_back((
+                    other_peer_id.to_string(),
+                    p::OutgoingMessage::EndSessionError {
+                        peer_id: peer_id.to_string(),
+                        error: error.to_string()
+                    },
+                ));
+
+                self.consumers.insert(other_peer_id.to_string(), None);
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "Producer {} has no consumer {}",
+                    peer_id,
+                    other_peer_id
+                ))
+            }
+        } else if let Some(Some(producer_id)) = self.consumers.get(peer_id) {
+            if producer_id == other_peer_id {
+                info!(producer_id=%other_peer_id, consumer_id=%peer_id, error=%error, "ended session");
+
+                self.consumers.insert(peer_id.to_string(), None);
+                self.producers
+                    .get_mut(other_peer_id)
+                    .unwrap()
+                    .remove(peer_id);
+
+                self.items.push_back((
+                    other_peer_id.to_string(),
+                    p::OutgoingMessage::EndSessionError {
+                        peer_id: peer_id.to_string(),
+                        error: error.to_string()
+                    },
+                ));
+
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "Consumer {} is not in a session with {}",
+                    peer_id,
+                    other_peer_id
+                ))
+            }
+        } else {
+            Err(anyhow!(
+                "No session between {} and {}",
+                peer_id,
+                other_peer_id
+            ))
+        }
+    }
+
 
     /// List producer peers
     #[instrument(level = "debug", skip(self))]

@@ -58,6 +58,9 @@ pub enum OutgoingMessage {
     /// Signals that the session the peer was in was ended
     #[serde(rename_all = "camelCase")]
     EndSession { peer_id: String },
+    /// Signals that the session the peer was in was ended
+    #[serde(rename_all = "camelCase")]
+    EndSessionError { peer_id: String, error: String },
     /// Messages directly forwarded from one peer to another
     Peer(PeerMessage),
     /// Provides the current list of consumer peers
@@ -151,6 +154,15 @@ pub struct EndSessionMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+/// End a session
+pub struct EndSessionErrorMessage {
+    /// The identifier of the peer to end the session with
+    pub peer_id: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 #[serde(rename_all = "camelCase")]
 /// Messages received by the server from peers
@@ -161,6 +173,8 @@ pub enum IncomingMessage {
     StartSession(StartSessionMessage),
     /// End an existing session
     EndSession(EndSessionMessage),
+    /// End an existing session with an error
+    EndSessionError(EndSessionErrorMessage),
     /// Send a message to a peer the sender is currently in session with
     Peer(PeerMessage),
     /// Retrieve the current list of producers
