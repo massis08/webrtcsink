@@ -1290,9 +1290,7 @@ impl WebRTCSink {
         }
 
         webrtcsink_consumer_error_or_ok(gstreamer_add(&webrtcbin, &state.pipeline), peer_id)?;
-
-        webrtcsink_consumer_error_or_ok(gstreamer_create_element("dd", None), peer_id)?;
-
+        
         let element_clone = element.downgrade();
         let peer_id_clone = peer_id.to_owned();
         webrtcbin.connect("on-ice-candidate", false, move |values| {
