@@ -1058,7 +1058,10 @@ impl WebRTCSink {
     /// Build an ordered map of Codecs, given user-provided audio / video caps */
     fn lookup_codecs(&self, _element: &super::WebRTCSink,) -> Result<BTreeMap<String, Codec>, WebRTCSinkError> {
 
-        let settings = self.settings.lock().unwrap();
+        let settings = match self.settings.lock() {
+            Ok(settings) => Ok(settings),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get settings from mutex".to_string())),
+        }?;
 
         if settings.video_caps.is_empty() && settings.audio_caps.is_empty() {
             return Err(WebRTCSinkError::ProducerPipelineError { 
@@ -1088,9 +1091,12 @@ impl WebRTCSink {
     fn prepare(&self, element: &super::WebRTCSink) -> Result<(), WebRTCSinkError> {
         gst::debug!(CAT, obj: element, "preparing webrtcsink element");
 
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
+
+        state
             .streams
             .iter_mut()
             .try_for_each(|(_, stream)| stream.prepare(element))?;
@@ -1103,7 +1109,10 @@ impl WebRTCSink {
     fn unprepare(&self, element: &super::WebRTCSink, error: Option<WebRTCSinkError>) -> Result<(), Error> {
         gst::info!(CAT, obj: element, "unpreparing webrtcsink element");
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         let consumer_ids: Vec<_> = state.consumers.keys().map(|k| k.to_owned()).collect();
 
@@ -1130,7 +1139,10 @@ impl WebRTCSink {
 
     /// When using a custom signaller
     pub fn set_signaller(&self, signaller: Box<dyn super::SignallableObject>) -> Result<(), Error> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         state.signaller = signaller;
 
@@ -1154,28 +1166,37 @@ impl WebRTCSink {
         offer: gst_webrtc::WebRTCSessionDescription,
         peer_id: &str,
     ) {
-        let mut state = self.state.lock().unwrap();
 
-        if let Some(consumer) = state.consumers.get(peer_id) {
-            consumer
-                .webrtcbin
-                .emit_by_name::<()>("set-local-description", &[&offer, &None::<gst::Promise>]);
+        if let Ok(mut state) = self.state.lock(){
 
-            if let Err(err) = state.signaller.handle_sdp(element, peer_id, &offer) {
-                gst::warning!(
-                    CAT,
-                    "Failed to handle SDP for consumer {}: {}",
-                    peer_id,
-                    err
-                );
-                let error = WebRTCSinkError::FailedNegotiate { details: err.to_string(), peer_id: peer_id.to_string() };
-                let _ = state.remove_consumer(element, peer_id, true, Some(error));
+            if let Some(consumer) = state.consumers.get(peer_id) {
+                consumer
+                    .webrtcbin
+                    .emit_by_name::<()>("set-local-description", &[&offer, &None::<gst::Promise>]);
+
+                if let Err(err) = state.signaller.handle_sdp(element, peer_id, &offer) {
+                    gst::warning!(
+                        CAT,
+                        "Failed to handle SDP for consumer {}: {}",
+                        peer_id,
+                        err
+                    );
+                    let error = WebRTCSinkError::FailedNegotiate { details: err.to_string(), peer_id: peer_id.to_string() };
+                    let _ = state.remove_consumer(element, peer_id, true, Some(error));
+                }
             }
+        } else {
+            let this = Self::instance(&self);
+            let error = WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string());
+            let _ = this.remove_consumer(peer_id, true, Some(error));
         }
     }
 
     fn negotiate(&self, element: &super::WebRTCSink, peer_id: &str) -> Result<(), WebRTCSinkError>{
-        let state = self.state.lock().unwrap();
+        let state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         gst::debug!(CAT, obj: element, "Negotiating for peer {}", peer_id);
 
@@ -1269,24 +1290,29 @@ impl WebRTCSink {
         sdp_m_line_index: u32,
         candidate: String
     ) {
-        let mut state = self.state.lock().unwrap();
-        if let Err(err) =
-            state
-                .signaller
-                .handle_ice(element, &peer_id, &candidate, Some(sdp_m_line_index), None)
-        {
-            gst::warning!(
-                CAT,
-                "Failed to handle ICE for consumer {}: {}",
-                peer_id,
-                err
-            );
+        if let Ok(mut state) = self.state.lock(){
+            if let Err(err) =
+                state
+                    .signaller
+                    .handle_ice(element, &peer_id, &candidate, Some(sdp_m_line_index), None)
+            {
+                gst::warning!(
+                    CAT,
+                    "Failed to handle ICE for consumer {}: {}",
+                    peer_id,
+                    err
+                );
 
-            let error = WebRTCSinkError::FailedNegotiate { 
-                details: "failed to handle ICE".to_string(), 
-                peer_id: peer_id.to_string() 
-            };
-            let _ = state.remove_consumer(element, &peer_id, true, Some(error));
+                let error = WebRTCSinkError::FailedNegotiate { 
+                    details: "failed to handle ICE".to_string(), 
+                    peer_id: peer_id.to_string() 
+                };
+                let _ = state.remove_consumer(element, &peer_id, true, Some(error));
+            }
+        } else {
+            let this = Self::instance(&self);
+            let error = WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string());
+            let _ = this.remove_consumer(&peer_id, true, Some(error));
         }
     }
 
@@ -1296,9 +1322,15 @@ impl WebRTCSink {
         peer_id: &str,
     )-> Result<gst::Element, WebRTCSinkError> {
 
-        let settings = self.settings.lock().unwrap();
+        let settings = match self.settings.lock() {
+            Ok(settings) => Ok(settings),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get settings from mutex".to_string())),
+        }?;
 
-        let state = self.state.lock().unwrap();
+        let state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
         
         if state.consumers.contains_key(peer_id) {
             return Err(WebRTCSinkError::DuplicateConsumerId(peer_id.to_string()));
@@ -1407,19 +1439,22 @@ impl WebRTCSink {
                 }
 
                 if state == gst_webrtc::WebRTCICEConnectionState::Completed {
-                    let state = this.state.lock().unwrap();
-
-                    if let Some(consumer) = state.consumers.get(&peer_id_clone) {
-                        for webrtc_pad in consumer.webrtc_pads.values() {
-                            if let Some(srcpad) = webrtc_pad.pad.peer() {
-                                srcpad.send_event(
-                                    gst_video::UpstreamForceKeyUnitEvent::builder()
-                                        .all_headers(true)
-                                        .build(),
-                                );
+                    if let Ok(state) = this.state.lock() {
+                        if let Some(consumer) = state.consumers.get(&peer_id_clone) {
+                            for webrtc_pad in consumer.webrtc_pads.values() {
+                                if let Some(srcpad) = webrtc_pad.pad.peer() {
+                                    srcpad.send_event(
+                                        gst_video::UpstreamForceKeyUnitEvent::builder()
+                                            .all_headers(true)
+                                            .build(),
+                                    );
+                                }
                             }
                         }
-                    }
+                    } else {
+                        let error = WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string());
+                        let _ = this.remove_consumer(&element, &peer_id_clone, true, Some(error));
+                    }                   
                 }
             }
         });
@@ -1456,8 +1491,15 @@ impl WebRTCSink {
             peer_id.to_string()
         );
 
-        let settings = self.settings.lock().unwrap();
-        let mut state = self.state.lock().unwrap();
+        let settings = match self.settings.lock() {
+            Ok(settings) => Ok(settings),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get settings from mutex".to_string())),
+        }?;
+
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         state
             .streams
@@ -1502,7 +1544,10 @@ impl WebRTCSink {
         signal: bool,
         error: Option<WebRTCSinkError>
     ) -> Result<(), WebRTCSinkError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         if !state.consumers.contains_key(peer_id) {
             return Err(WebRTCSinkError::NoConsumerWithId(peer_id.to_string()));
@@ -1523,8 +1568,10 @@ impl WebRTCSink {
         peer_id: &str,
         error: Option<WebRTCSinkError>
     ) -> Result<(), WebRTCSinkError> {
-        //Remover webrtcbin from pipeline if it was already added
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         match state.pipeline.by_name(peer_id) {
             Some(elem) => {
@@ -1544,7 +1591,10 @@ impl WebRTCSink {
 
     fn on_remote_description_set(&self, element: &super::WebRTCSink, peer_id: String) -> Result<(), WebRTCSinkError>{
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         let mut consumer =  webrtcsink_consumer_some_or_none(state.consumers.remove(&peer_id), &peer_id, "could not get consumer")?;
        
@@ -1584,7 +1634,10 @@ impl WebRTCSink {
         _sdp_mid: Option<String>,
         candidate: &str,
     ) -> Result<(), WebRTCSinkError> {
-        let state = self.state.lock().unwrap();
+        let state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         let sdp_m_line_index = sdp_m_line_index.ok_or(WebRTCSinkError::MandatorySdpMlineIndex)?;
 
@@ -1606,7 +1659,10 @@ impl WebRTCSink {
         peer_id: &str,
         desc: &gst_webrtc::WebRTCSessionDescription,
     ) -> Result<(), WebRTCSinkError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
         if let Some(consumer) = state.consumers.get_mut(peer_id) {
             let sdp = desc.sdp();
@@ -1667,59 +1723,70 @@ impl WebRTCSink {
 
                     let mut all_pads_have_caps = true;
 
-                    let mut state = self.state.lock().unwrap();
+                    if let Ok(mut state) = self.state.lock() {
+                        state
+                            .streams
+                            .iter_mut()
+                            .for_each(|(_, mut stream)| {
+                                if stream.sink_pad.upcast_ref::<gst::Pad>() == pad {
+                                    stream.in_caps = Some(e.caps().to_owned());
+                                } else if stream.in_caps.is_none() {
+                                    all_pads_have_caps = false;
+                                }
+                            });
 
-                    state
-                        .streams
-                        .iter_mut()
-                        .for_each(|(_, mut stream)| {
-                            if stream.sink_pad.upcast_ref::<gst::Pad>() == pad {
-                                stream.in_caps = Some(e.caps().to_owned());
-                            } else if stream.in_caps.is_none() {
-                                all_pads_have_caps = false;
-                            }
-                        });
+                        if all_pads_have_caps {
+                            match self.lookup_codecs(&element) {
+                                Ok(codecs) => state.codecs = codecs,
+                                Err(error) => {
+                                    gst::element_error!(
+                                        element,
+                                        gst::StreamError::Failed,
+                                        ["Failed to lookup codec: {:?}", error]
+                                    );
+                                    return false
+                                },
+                            };
 
-                    if all_pads_have_caps {
-                        match self.lookup_codecs(&element) {
-                            Ok(codecs) => state.codecs = codecs,
-                            Err(error) => {
-                                gst::element_error!(
-                                    element,
-                                    gst::StreamError::Failed,
-                                    ["Failed to lookup codec: {:?}", error]
-                                );
-                                return false
-                            },
-                        };
+                            match self.create_producer_pipeline(&element, &mut state) {
+                                Ok(streams) => state.streams = streams,
+                                Err(error) => {
+                                    gst::element_error!(
+                                        element,
+                                        gst::StreamError::Failed,
+                                        ["Failed to create producer pipeline: {:?}", error]
+                                    );
+                                    let _ = self.unprepare(element, None);
+                                    return false;
+                                },
+                            };
 
-                        match self.create_producer_pipeline(&element, &mut state) {
-                            Ok(streams) => state.streams = streams,
-                            Err(error) => {
-                                gst::element_error!(
-                                    element,
-                                    gst::StreamError::Failed,
-                                    ["Failed to create producer pipeline: {:?}", error]
-                                );
-                                let _ = self.unprepare(element, None);
-                                return false;
-                            },
-                        };
+                            match self.prepare_producer_bus_pipeline(&element, &mut state) {
+                                Ok(_) => (),
+                                Err(error) => {
+                                    gst::element_error!(
+                                        element,
+                                        gst::StreamError::Failed,
+                                        ["Failed to prepare producer pipeline bus: {:?}", error]
+                                    );
+                                    let _ = self.unprepare(element, None);
+                                    return false;
+                                },
+                            };
+                            state.pipeline_prepared = true;
+                            state.maybe_start_signaller(&element);
+                        }    
 
-                        match self.prepare_producer_bus_pipeline(&element, &mut state) {
-                            Ok(_) => (),
-                            Err(error) => {
-                                gst::element_error!(
-                                    element,
-                                    gst::StreamError::Failed,
-                                    ["Failed to prepare producer pipeline bus: {:?}", error]
-                                );
-                                let _ = self.unprepare(element, None);
-                                return false;
-                            },
-                        };
-                        state.pipeline_prepared = true;
-                        state.maybe_start_signaller(&element);
+
+                    }
+                    else {
+                        gst::element_error!(
+                            element,
+                            gst::StreamError::Failed,
+                            ["Failed to get state from mutex"]
+                        );
+                        let _ = self.unprepare(element, None);
+                        return false;
                     }
 
                     pad.event_default(Some(element), event)
@@ -2072,67 +2139,76 @@ impl ElementImpl for WebRTCSink {
             return None;
         }
 
-        let mut state = self.state.lock().unwrap();
+        if let Ok(mut state) = self.state.lock(){
+        
+       
+            let (name, payload) = if templ.name().starts_with("video_") {
+                let name = format!("video_{}", state.video_serial);
+                state.video_serial += 1;
+                (name, 96)
+            } else {
+                let name = format!("audio_{}", state.audio_serial);
+                state.audio_serial += 1;
+                (name, 97)
+            };
 
-        let (name, payload) = if templ.name().starts_with("video_") {
-            let name = format!("video_{}", state.video_serial);
-            state.video_serial += 1;
-            (name, 96)
+            let sink_pad = gst::GhostPad::builder_with_template(templ, Some(name.as_str()))
+                .event_function(|pad, parent, event| {
+                    WebRTCSink::catch_panic_pad_function(
+                        parent,
+                        || false,
+                        |sink, element| sink.sink_event(pad.upcast_ref(), element, event),
+                    )
+                })
+                .build();
+
+            match sink_pad.set_active(true){
+                Ok(_) => (),
+                Err(_) => {
+                    gst::element_error!(
+                        element,
+                        gst::StreamError::Failed,
+                        ["Failed to activate sink pad of webrtcsink"]
+                    );
+                },
+            }
+            sink_pad.use_fixed_caps();
+            match element.add_pad(&sink_pad) {
+                Ok(_) => (),
+                Err(_) => {
+                    gst::element_error!(
+                        element,
+                        gst::StreamError::Failed,
+                        ["Failed to add sink pad to webrtcsink"]
+                    );
+                },
+            }
+
+            let srrc = state.generate_ssrc();
+
+            state.streams.insert(
+                name,
+                InputStream {
+                    sink_pad: sink_pad.clone(),
+                    producer: None,
+                    in_caps: None,
+                    clocksync: None,
+                    payload: Some(payload.clone()),
+                    tee: None,
+                    ssrc: srrc,
+                    codec_preferences: None,
+                },
+            );
+
+            Some(sink_pad.upcast())
         } else {
-            let name = format!("audio_{}", state.audio_serial);
-            state.audio_serial += 1;
-            (name, 97)
-        };
-
-        let sink_pad = gst::GhostPad::builder_with_template(templ, Some(name.as_str()))
-            .event_function(|pad, parent, event| {
-                WebRTCSink::catch_panic_pad_function(
-                    parent,
-                    || false,
-                    |sink, element| sink.sink_event(pad.upcast_ref(), element, event),
-                )
-            })
-            .build();
-
-        match sink_pad.set_active(true){
-            Ok(_) => (),
-            Err(_) => {
-                gst::element_error!(
-                    element,
-                    gst::StreamError::Failed,
-                    ["Failed to activate sink pad of webrtcsink"]
-                );
-            },
+            gst::element_error!(
+                element,
+                gst::StreamError::Failed,
+                ["Failed get state from mutex"]
+            );
+            None
         }
-        sink_pad.use_fixed_caps();
-        match element.add_pad(&sink_pad) {
-            Ok(_) => (),
-            Err(_) => {
-                gst::element_error!(
-                    element,
-                    gst::StreamError::Failed,
-                    ["Failed to add sink pad to webrtcsink"]
-                );
-            },
-        }
-
-        let srrc = state.generate_ssrc();
-
-        state.streams.insert(
-            name,
-            InputStream {
-                sink_pad: sink_pad.clone(),
-                producer: None,
-                in_caps: None,
-                clocksync: None,
-                payload: Some(payload.clone()),
-                tee: None,
-                ssrc: srrc,
-                codec_preferences: None,
-            },
-        );
-
-        Some(sink_pad.upcast())
     }
 
     fn change_state(
@@ -2169,8 +2245,18 @@ impl ElementImpl for WebRTCSink {
                 ret = Ok(gst::StateChangeSuccess::NoPreroll);
             }
             gst::StateChange::PausedToPlaying => {
-                let mut state = self.state.lock().unwrap();
-                state.maybe_start_signaller(element);
+                if let Ok(mut state) = self.state.lock() {
+                    state.maybe_start_signaller(element);
+                }
+                else {
+                    gst::element_error!(
+                        element,
+                        gst::StreamError::Failed,
+                        ["Failed to get state from mutex"]
+                    );
+                    return Err(gst::StateChangeError);
+                }
+               
             }
             _ => (),
         }
