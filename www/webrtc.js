@@ -116,7 +116,7 @@ function Session(our_id, peer_id, closed_callback) {
     this.peer_connection
       .setLocalDescription(desc)
       .then(() => {
-        this.setStatus("Sending SDP answer");
+        //this.setStatus("Sending SDP answer");
         var sdp = {
           type: "peer",
           peerId: this.peer_id,
@@ -263,7 +263,7 @@ function Session(our_id, peer_id, closed_callback) {
 
     console.log(videoTracks);
 
-    if (videoTracks.length > 0) {
+    if (videoTracks.length + audioTracks.length > 0) {
       console.log(
         "Incoming stream: " +
           videoTracks.length +
@@ -402,7 +402,7 @@ function addPeer(peer_id, display_name) {
     var session_div_str =
       '<div class="session" id="session-' +
       our_id +
-      '"><video preload="none" class="stream" id="stream-' +
+      '"><video autoPlay={true} controls={true} muted={true} class="stream" id="stream-' +
       our_id +
       '"></video><p>Status: <span id="status-' +
       our_id +
