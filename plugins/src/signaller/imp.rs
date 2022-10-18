@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use webrtcsink_protocol as p;
+use crate::utils::*;
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new(
@@ -51,7 +52,11 @@ pub struct Signaller {
 
 impl Signaller {
     async fn connect(&self, element: &WebRTCSink) -> Result<(), Error> {
-        let settings = self.settings.lock().unwrap().clone();
+
+        let settings = match self.settings.lock() {
+            Ok(settings) => Ok(settings.clone()),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get settings from mutex".to_string())),
+        }?;
 
         let connector = if let Some(path) = settings.cafile {
             let cert = async_std::fs::read_to_string(&path).await?;
@@ -62,8 +67,9 @@ impl Signaller {
             None
         };
 
+        let address = signaller_some_or_none(settings.address, "Failed to get address from settings")?;
         let (ws, _) = async_tungstenite::async_std::connect_async_with_tls_connector(
-            settings.address.unwrap(),
+            address,
             connector,
         )
         .await?;
@@ -98,8 +104,12 @@ impl Signaller {
                     Ok(Some(msg)) => {
                         if let Some(element) = element_clone.upgrade() {
                             gst::trace!(CAT, obj: &element, "Sending websocket message {:?}", msg);
-                        }
-                        ws_sink.send(WsMessage::Text(serde_json::to_string(&msg).unwrap())).await?;
+                            match serde_json::to_string(&msg) {
+                                Ok(msg) => ws_sink.send(WsMessage::Text(msg)).await?,
+                                Err(err) => element.handle_signalling_error(err.into()),
+                            }
+                        }                     
+            
                     }
                     Ok(None) => {
                         break;
@@ -183,21 +193,31 @@ impl Signaller {
                                         peer_message,
                                     }) => match peer_message {
                                         p::PeerMessageInner::Sdp(p::SdpMessage::Answer { sdp }) => {
-                                            if let Err(err) = element.handle_sdp(
-                                                &peer_id,
-                                                &gst_webrtc::WebRTCSessionDescription::new(
-                                                    gst_webrtc::WebRTCSDPType::Answer,
-                                                    gst_sdp::SDPMessage::parse_buffer(
-                                                        sdp.as_bytes(),
-                                                    )
-                                                    .unwrap(),
-                                                ),
-                                            ) {
-                                                gst::error!(CAT, obj: &element, "Failed to handle sdp: {}", err);
-                                                if let Err(err) = element.remove_consumer(&peer_id, true,Some(err)) {
-                                                    gst::warning!(CAT, obj: &element, "Failed to remove consumer {}: {}", &peer_id, err);
+                                            match gst_sdp::SDPMessage::parse_buffer(sdp.as_bytes()){
+                                                Ok(sdp) => {
+                                                    if let Err(err) = element.handle_sdp(
+                                                        &peer_id,
+                                                        &gst_webrtc::WebRTCSessionDescription::new(
+                                                            gst_webrtc::WebRTCSDPType::Answer,
+                                                            sdp,
+                                                        ),
+                                                    ) {
+                                                        gst::error!(CAT, obj: &element, "Failed to handle sdp: {}", err);
+                                                        if let Err(err) = element.remove_consumer(&peer_id, true,Some(err)) {
+                                                            gst::warning!(CAT, obj: &element, "Failed to remove consumer {}: {}", &peer_id, err);
+                                                        }
+                                                    }
+                                                },
+                                                Err(err) => {
+                                                    gst::error!(CAT, obj: &element, "Failed to handle sdp: {}", err);
+                                                    let err = WebRTCSinkError::FailedNegotiate { details: "failed to parse sdp buffer".to_string(), peer_id: peer_id.clone() };
+                                                    if let Err(err) = element.remove_consumer(&peer_id, true,Some(err)) {
+                                                        gst::warning!(CAT, obj: &element, "Failed to remove consumer {}: {}", &peer_id, err);
+                                                    }
                                                 }
                                             }
+
+                                            
                                         }
                                         p::PeerMessageInner::Sdp(p::SdpMessage::Offer {
                                             ..
@@ -273,7 +293,10 @@ impl Signaller {
             }
         });
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
         state.websocket_sender = Some(websocket_sender);
         state.send_task_handle = Some(send_task_handle);
         state.receive_task_handle = Some(receive_task_handle);
@@ -297,13 +320,18 @@ impl Signaller {
         element: &WebRTCSink,
         peer_id: &str,
         sdp: &gst_webrtc::WebRTCSessionDescription,
-    ) {
-        let state = self.state.lock().unwrap();
+    ) -> Result<(),WebRTCSinkError> {
+        let state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
+
+        let sdp =  signaller_error_or_ok(sdp.sdp().as_text(), "failed to get sdp as text")?;
 
         let msg = p::IncomingMessage::Peer(p::PeerMessage {
             peer_id: peer_id.to_string(),
             peer_message: p::PeerMessageInner::Sdp(p::SdpMessage::Offer {
-                sdp: sdp.sdp().as_text().unwrap(),
+                sdp: sdp,
             }),
         });
 
@@ -317,6 +345,8 @@ impl Signaller {
                 }
             });
         }
+
+        Ok(())
     }
 
     pub fn handle_ice(
@@ -326,14 +356,18 @@ impl Signaller {
         candidate: &str,
         sdp_m_line_index: Option<u32>,
         _sdp_mid: Option<String>,
-    ) {
-        let state = self.state.lock().unwrap();
+    )  -> Result<(),WebRTCSinkError> {
+        let state = match self.state.lock() {
+            Ok(state) => Ok(state),
+            Err(_) => Err(WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string())),
+        }?;
 
+        let sdp_m_line_index = signaller_some_or_none(sdp_m_line_index, "failed to get sdp m line index")?;
         let msg = p::IncomingMessage::Peer(p::PeerMessage {
             peer_id: peer_id.to_string(),
             peer_message: p::PeerMessageInner::Ice {
                 candidate: candidate.to_string(),
-                sdp_m_line_index: sdp_m_line_index.unwrap(),
+                sdp_m_line_index: sdp_m_line_index,
             },
         });
 
@@ -347,71 +381,88 @@ impl Signaller {
                 }
             });
         }
+        Ok(())
     }
 
     pub fn stop(&self, element: &WebRTCSink) {
         gst::info!(CAT, obj: element, "Stopping now");
 
-        let mut state = self.state.lock().unwrap();
-        let send_task_handle = state.send_task_handle.take();
-        let receive_task_handle = state.receive_task_handle.take();
-        if let Some(mut sender) = state.websocket_sender.take() {
-            task::block_on(async move {
-                sender.close_channel();
-
-                if let Some(handle) = send_task_handle {
-                    if let Err(err) = handle.await {
-                        gst::warning!(CAT, obj: element, "Error while joining send task: {}", err);
+        if let Ok(mut state) = self.state.lock() {
+            let send_task_handle = state.send_task_handle.take();
+            let receive_task_handle = state.receive_task_handle.take();
+            if let Some(mut sender) = state.websocket_sender.take() {
+                task::block_on(async move {
+                    sender.close_channel();
+    
+                    if let Some(handle) = send_task_handle {
+                        if let Err(err) = handle.await {
+                            gst::warning!(CAT, obj: element, "Error while joining send task: {}", err);
+                        }
                     }
-                }
-
-                if let Some(handle) = receive_task_handle {
-                    handle.await;
-                }
-            });
+    
+                    if let Some(handle) = receive_task_handle {
+                        handle.await;
+                    }
+                });
+            }
         }
+        else{
+            let err = WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string());
+            element.handle_signalling_error(Box::new(err));
+        }
+      
     }
 
     fn send_end_session_with_error(&self, element: &WebRTCSink, peer_id: &str, error: WebRTCSinkError){
         gst::info!(CAT, "Going to send error");
-        let state = self.state.lock().unwrap();
-        let peer_id = peer_id.to_string();
-        let element = element.downgrade();
-        if let Some(mut sender) = state.websocket_sender.clone() {
-            task::spawn(async move {
-                if let Err(err) = sender
-                    .send(p::IncomingMessage::EndSessionError(p::EndSessionErrorMessage {
-                        peer_id: peer_id.to_string(),
-                        error: error.to_string(),
-                    }))
-                    .await
-                {
-                    if let Some(element) = element.upgrade() {
-                        element.handle_signalling_error(anyhow!("Error: {}", err).into());
+        if let Ok(state) = self.state.lock() {
+            let peer_id = peer_id.to_string();
+            let element = element.downgrade();
+            if let Some(mut sender) = state.websocket_sender.clone() {
+                task::spawn(async move {
+                    if let Err(err) = sender
+                        .send(p::IncomingMessage::EndSessionError(p::EndSessionErrorMessage {
+                            peer_id: peer_id.to_string(),
+                            error: error.to_string(),
+                        }))
+                        .await
+                    {
+                        if let Some(element) = element.upgrade() {
+                            element.handle_signalling_error(anyhow!("Error: {}", err).into());
+                        }
                     }
-                }
-            });
+                });
+            }
+        }
+        else{
+            let err = WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string());
+            element.handle_signalling_error(Box::new(err));
         }
     }
 
     fn send_end_session(&self, element: &WebRTCSink, peer_id: &str){
         gst::info!(CAT, "Not going to send error");
-        let state = self.state.lock().unwrap();
-        let peer_id = peer_id.to_string();
-        let element = element.downgrade();
-        if let Some(mut sender) = state.websocket_sender.clone() {
-            task::spawn(async move {
-                if let Err(err) = sender
-                    .send(p::IncomingMessage::EndSession(p::EndSessionMessage {
-                        peer_id: peer_id.to_string(),
-                    }))
-                    .await
-                {
-                    if let Some(element) = element.upgrade() {
-                        element.handle_signalling_error(anyhow!("Error: {}", err).into());
+        if let Ok(state) = self.state.lock() {
+            let peer_id = peer_id.to_string();
+            let element = element.downgrade();
+            if let Some(mut sender) = state.websocket_sender.clone() {
+                task::spawn(async move {
+                    if let Err(err) = sender
+                        .send(p::IncomingMessage::EndSession(p::EndSessionMessage {
+                            peer_id: peer_id.to_string(),
+                        }))
+                        .await
+                    {
+                        if let Some(element) = element.upgrade() {
+                            element.handle_signalling_error(anyhow!("Error: {}", err).into());
+                        }
                     }
-                }
-            });
+                });
+            }
+        }
+        else{
+            let err = WebRTCSinkError::FailedLockMutex("failed to get state from mutex".to_string());
+            element.handle_signalling_error(Box::new(err));
         }
     }
 

@@ -36,6 +36,8 @@ pub enum WebRTCSinkError {
     FailedNegotiate { details: String, peer_id: String },
     #[error("`{0}`")]
     FailedLockMutex(String),
+    #[error("`{0}`")]
+    FailedSignaller(String),
 }
 
 pub trait Signallable: Sync + Send + 'static {

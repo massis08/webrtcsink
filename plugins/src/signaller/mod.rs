@@ -27,7 +27,7 @@ impl Signallable for Signaller {
         sdp: &gst_webrtc::WebRTCSessionDescription,
     ) -> Result<(), Box<dyn Error>> {
         let signaller = imp::Signaller::from_instance(self);
-        signaller.handle_sdp(element, peer_id, sdp);
+        signaller.handle_sdp(element, peer_id, sdp)?;
         Ok(())
     }
 
@@ -40,7 +40,7 @@ impl Signallable for Signaller {
         sdp_mid: Option<String>,
     ) -> Result<(), Box<dyn Error>> {
         let signaller = imp::Signaller::from_instance(self);
-        signaller.handle_ice(element, peer_id, candidate, sdp_mline_index, sdp_mid);
+        signaller.handle_ice(element, peer_id, candidate, sdp_mline_index, sdp_mid)?;
         Ok(())
     }
 

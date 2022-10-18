@@ -1,4 +1,5 @@
 use gst::ElementFactory;
+use gst::glib::BoolError;
 use gst::prelude::*;
 use super::webrtcsink::WebRTCSinkError;
 
@@ -114,6 +115,19 @@ pub fn webrtcsink_unprepare_some_or_none<T>(result: Option<T>, error_message: &s
             details: error_message.to_string()
         })
     }
+}
+
+pub fn signaller_some_or_none<T>(result: Option<T>, error_message: &str) -> Result<T,WebRTCSinkError> {
+    match result {
+        Some(t) => Ok(t),
+        None => Err(WebRTCSinkError::FailedSignaller(error_message.to_string())),
+    }
+}
+
+pub fn signaller_error_or_ok<T>(result: Result<T, BoolError>, error_message: &str) -> Result<T,WebRTCSinkError> {
+    result.map_err(|_err| {
+        WebRTCSinkError::FailedSignaller(error_message.to_string())
+    })
 }
 
 pub fn gstreamer_create_element(element: &str, name: Option<&str>) -> Result<gst::Element, GstreamerError> {
