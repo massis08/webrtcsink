@@ -12,7 +12,7 @@ glib::wrapper! {
 unsafe impl Send for WebRTCSink {}
 unsafe impl Sync for WebRTCSink {}
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum WebRTCSinkError {
     #[error("no consumer with id")]
     NoConsumerWithId(String),
@@ -24,10 +24,20 @@ pub enum WebRTCSinkError {
     MandatorySdpMlineIndex,
     #[error("duplicate consumer id")]
     DuplicateConsumerId(String),
-    #[error("error setting up consumer pipeline")]
-    ConsumerPipelineError { peer_id: String, details: String },
-    #[error("error setting up producer pipeline")]
+    #[error("producer pipeline error: `{details}`")]
     ProducerPipelineError { details: String },
+    #[error("consumer `{peer_id}` pipeline error: `{details}`")]
+    ConsumerPipelineError { peer_id: String, details: String },
+    #[error("failed to prepare webrtcsink element: `{details}`")]
+    PrepareWebrtcsinkError { details: String },
+    #[error("failed to unprepare webrtcsink element: `{details}`")]
+    UnprepareWebrtcsinkError { details: String },
+    #[error("failed to negotiate with peer `{peer_id}`: `{details}`")]
+    FailedNegotiate { details: String, peer_id: String },
+    #[error("`{0}`")]
+    FailedLockMutex(String),
+    #[error("`{0}`")]
+    FailedSignaller(String),
 }
 
 pub trait Signallable: Sync + Send + 'static {
@@ -53,7 +63,7 @@ pub trait Signallable: Sync + Send + 'static {
         sdp_mid: Option<String>,
     ) -> Result<(), Box<dyn Error>>;
 
-    fn consumer_removed(&mut self, element: &WebRTCSink, peer_id: &str);
+    fn consumer_removed(&mut self, element: &WebRTCSink, peer_id: &str, error: Option<WebRTCSinkError>);
 
     fn stop(&mut self, element: &WebRTCSink);
 }
@@ -116,16 +126,29 @@ impl WebRTCSink {
         ws.handle_signalling_error(self, anyhow::anyhow!(error));
     }
 
-    pub fn add_consumer(&self, peer_id: &str) -> Result<(), WebRTCSinkError> {
+    pub fn add_consumer(&self, peer_id: &str, webrtcbin: gst::Element) -> Result<(), WebRTCSinkError> {
         let ws = imp::WebRTCSink::from_instance(self);
 
-        ws.add_consumer(self, peer_id)
+        ws.add_consumer(self, peer_id, webrtcbin)
     }
 
-    pub fn remove_consumer(&self, peer_id: &str) -> Result<(), WebRTCSinkError> {
+    pub fn create_webrtcbin_for_consumer(&self, peer_id: &str) -> Result<gst::Element, WebRTCSinkError> {
         let ws = imp::WebRTCSink::from_instance(self);
 
-        ws.remove_consumer(self, peer_id, false)
+        ws.create_webrtcbin_for_consumer(self, peer_id)
+    }
+
+
+    pub fn remove_consumer(&self, peer_id: &str, signal: bool, error: Option<WebRTCSinkError>) -> Result<(), WebRTCSinkError> {
+        let ws = imp::WebRTCSink::from_instance(self);
+
+        ws.remove_consumer(self, peer_id, signal, error)
+    }
+
+    pub fn remove_webrtcbin(&self, peer_id: &str, error: Option<WebRTCSinkError>) -> Result<(), WebRTCSinkError> {
+        let ws = imp::WebRTCSink::from_instance(self);
+
+        ws.remove_webrtcbin(self, peer_id, error)
     }
 }
 
